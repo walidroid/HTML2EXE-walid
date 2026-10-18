@@ -29,17 +29,18 @@ namespace HTML2EXE_2
         // BUG-02 FIX: Initialise to a safe default so webviewURL is never null if GUI flow hits an edge case
         public static string webviewURL = IsBigBuild ? webview_big : webview;
 
-        public static readonly string tmpPath = Path.Combine(Path.GetTempPath(), $"HTML2EXE\\{Guid.NewGuid():N}");
+        public static readonly string baseAppDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HTML2EXE");
+        public static readonly string tmpPath = Path.Combine(baseAppDir, $"build_{Guid.NewGuid():N}");
         public static readonly string tmpWebfilesPath = Path.Combine(tmpPath, "webfiles");
 
-        private static readonly string tmpUpdatePath = Path.Combine(Path.GetTempPath(), $"HTML2EXE\\{Guid.NewGuid():N}.exe");
+        private static readonly string tmpUpdatePath = Path.Combine(baseAppDir, $"update_{Guid.NewGuid():N}.exe");
         private static readonly string tmpRceditPath = Path.Combine(tmpPath, "rcedit.exe");
         public static readonly string tmpConfigJson = Path.Combine(tmpPath, "config.json");
         public static readonly string tmpWebviewPath = Path.Combine(tmpPath, "webview.zip");
         private static readonly string tmpOutputPath = Path.Combine(tmpPath, "out.exe");
 
         public static bool GUI = false;
-        private static readonly string guiFlag = Path.Combine(Path.GetTempPath(), "HTML2EXE\\gui.flag");
+        private static readonly string guiFlag = Path.Combine(baseAppDir, "gui.flag");
         private static BrowseDialog browseDialog = new BrowseDialog();
         public static readonly HttpClient client = new();
 
@@ -67,11 +68,10 @@ namespace HTML2EXE_2
                 // updater invocation from exiting prematurely
                 if (File.Exists(guiFlag)) File.Delete(guiFlag);
 
-                // BUG-14 FIX: Best-effort cleanup of orphaned temp sub-folders from previous runs
-                string tempParent = Path.GetDirectoryName(tmpPath)!; // = %TEMP%\HTML2EXE
-                if (Directory.Exists(tempParent))
+                // Best-effort cleanup of orphaned build sub-folders from previous runs
+                if (Directory.Exists(baseAppDir))
                 {
-                    foreach (var staleDir in Directory.GetDirectories(tempParent))
+                    foreach (var staleDir in Directory.GetDirectories(baseAppDir))
                     {
                         try { Directory.Delete(staleDir, true); } catch { } // Best-effort; ignore locked dirs
                     }
