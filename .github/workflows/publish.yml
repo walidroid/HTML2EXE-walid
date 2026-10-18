@@ -250,6 +250,13 @@ jobs:
         name: webview-big
         path: ./dist
 
+    # -- Package ZIP files for seamless browser downloads (avoids browser raw EXE blocking)
+    - name: Package ZIP distributions
+      run: |
+        cd ./dist/standard && zip -9 ../HTML2EXE.zip HTML2EXE.exe && cd ../..
+        cd ./dist/big && zip -9 ../HTML2EXE-big.zip HTML2EXE-big.exe && cd ../..
+        cd ./dist/offline && zip -9 ../HTML2EXE-offline.zip HTML2EXE-offline.exe && cd ../..
+
     # -- Generate latest.json for the in-app auto-updater ----------------------
     - name: Generate latest.json
       run: |
@@ -268,9 +275,11 @@ jobs:
           printf "## HTML2EXE 2.%s\n\n" "$RUN"
           printf "| Download | Description |\n"
           printf "|---|---|\n"
-          printf "| [**HTML2EXE.exe**](https://github.com/%s/releases/download/%s/HTML2EXE.exe) | Requires [.NET 8.0 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0/runtime/desktop) — smallest download |\n" "$REPO" "$RUN"
-          printf "| [**HTML2EXE-big.exe**](https://github.com/%s/releases/download/%s/HTML2EXE-big.exe) | Self-contained — no .NET required |\n" "$REPO" "$RUN"
-          printf "| [**HTML2EXE-offline.exe**](https://github.com/%s/releases/download/%s/HTML2EXE-offline.exe) | Self-contained, no .NET, no auto-update |\n" "$REPO" "$RUN"
+          printf "| [**HTML2EXE-big.zip**](https://github.com/%s/releases/download/%s/HTML2EXE-big.zip) ⭐ | **Recommended** (Self-contained, avoids browser warnings) |\n" "$REPO" "$RUN"
+          printf "| [**HTML2EXE-big.exe**](https://github.com/%s/releases/download/%s/HTML2EXE-big.exe) | Self-contained executable — no .NET required |\n" "$REPO" "$RUN"
+          printf "| [**HTML2EXE.zip**](https://github.com/%s/releases/download/%s/HTML2EXE.zip) | Framework-dependent zip (requires .NET 8) |\n" "$REPO" "$RUN"
+          printf "| [**HTML2EXE.exe**](https://github.com/%s/releases/download/%s/HTML2EXE.exe) | Framework-dependent executable |\n" "$REPO" "$RUN"
+          printf "| [**HTML2EXE-offline.zip**](https://github.com/%s/releases/download/%s/HTML2EXE-offline.zip) | Offline zip (no auto-update) |\n" "$REPO" "$RUN"
           printf "| webview.zip | WebView2 runtime (framework-dependent) |\n"
           printf "| webview-big.zip | WebView2 runtime (self-contained) |\n"
           printf "| latest.json | Auto-update manifest |\n\n"
@@ -293,6 +302,9 @@ jobs:
           ./dist/standard/HTML2EXE.exe
           ./dist/big/HTML2EXE-big.exe
           ./dist/offline/HTML2EXE-offline.exe
+          ./dist/HTML2EXE.zip
+          ./dist/HTML2EXE-big.zip
+          ./dist/HTML2EXE-offline.zip
           ./dist/webview.zip
           ./dist/webview-big.zip
           ./dist/latest.json
