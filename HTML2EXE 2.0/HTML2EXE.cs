@@ -21,10 +21,11 @@ namespace HTML2EXE_2
 #endif
 
         private static readonly bool update = true; // Set to false to disable update check
-        private static readonly string latestJsonUrl = "https://github.com/jgc777/HTML2EXE-2.0/releases/latest/download/latest.json";
+        // URLs injected at build time by CI (see .github/workflows/publish.yml) — REPO_OWNER/REPO_NAME placeholder is replaced by sed
+        private static readonly string latestJsonUrl = "https://github.com/REPO_PLACEHOLDER/releases/latest/download/latest.json";
         public static readonly int CurrentVersion = 0; // Updated by GitHub at build, version 0 also disables update check
-        public static readonly string webview = "https://github.com/jgc777/HTML2EXE-2.0/releases/latest/download/webview.zip";
-        public static readonly string webview_big = "https://github.com/jgc777/HTML2EXE-2.0/releases/latest/download/webview-big.zip";
+        public static readonly string webview = "https://github.com/REPO_PLACEHOLDER/releases/latest/download/webview.zip";
+        public static readonly string webview_big = "https://github.com/REPO_PLACEHOLDER/releases/latest/download/webview-big.zip";
         // BUG-02 FIX: Initialise to a safe default so webviewURL is never null if GUI flow hits an edge case
         public static string webviewURL = IsBigBuild ? webview_big : webview;
 

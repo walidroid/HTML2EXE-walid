@@ -1,166 +1,301 @@
-name: Publish and release latest version
+name: Build and Release
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Triggers
+#  - Automatic on every push to master/main (skip pure-doc / config changes)
+#  - Manual via Actions tab, with an optional release-notes field
+# ─────────────────────────────────────────────────────────────────────────────
 on:
   workflow_dispatch:
+    inputs:
+      release_notes:
+        description: 'Extra release notes (appended to the changelog)'
+        required: false
+        default: ''
   push:
     branches:
       - master
+      - main
     paths-ignore:
-      - '*.md'
-      - '*.yml'
+      - '**.md'
+      - '**.yml'
       - '.gitignore'
       - 'LICENSE'
+      - '_config.yml'
+      - '_includes/**'
 
 permissions:
-  contents: write
+  contents: write   # needed to create releases and push tags
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Shared constants
+# ─────────────────────────────────────────────────────────────────────────────
+env:
+  DOTNET_VERSION: '8.0.x'
+  MAIN_PROJECT:   'HTML2EXE 2.0'
+  WV_PROJECT:     'HTML2EXE_Webview'
+
+# =============================================================================
+#  JOB 1 - BUILD
+#  Compiles all three release variants of the compiler and both WebView zips.
+# =============================================================================
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Check out repository
-      uses: actions/checkout@v4 # BUG-15 FIX: upgraded from v3
 
-    - name: Download rcedit
-      run: curl -L https://github.com/electron/rcedit/releases/latest/download/rcedit-x64.exe -o "HTML2EXE 2.0/tools/rcedit.exe"
+    # -- Source ----------------------------------------------------------------
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-    - name: Set up .NET 8.0
-      uses: actions/setup-dotnet@v4 # BUG-15 FIX: upgraded from v3
+    # -- Tooling ---------------------------------------------------------------
+    - name: Set up .NET ${{ env.DOTNET_VERSION }}
+      uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '8.0.x'
+        dotnet-version: ${{ env.DOTNET_VERSION }}
 
-    - name: Set build number
-      run: sed -i 's/CurrentVersion = .*;/CurrentVersion = ${{ github.run_number }};/' '/home/runner/work/HTML2EXE-2.0/HTML2EXE-2.0/HTML2EXE 2.0/HTML2EXE.cs'
+    - name: Download rcedit (Windows PE icon editor)
+      run: |
+        curl -fsSL \
+          https://github.com/electron/rcedit/releases/latest/download/rcedit-x64.exe \
+          -o "${{ github.workspace }}/HTML2EXE 2.0/tools/rcedit.exe"
 
-    - name: Restore dependencies
+    # -- Version & URL injection -----------------------------------------------
+    # Replace REPO_PLACEHOLDER with the actual "owner/repo" of this fork so
+    # that auto-update checks, webview downloads, and latest.json all point
+    # to this repository's own releases (not the original upstream repo).
+    - name: Inject repository name into source URLs
+      run: |
+        REPO="${{ github.repository }}"
+        sed -i "s|REPO_PLACEHOLDER|${REPO}|g" \
+          "${{ github.workspace }}/HTML2EXE 2.0/HTML2EXE.cs"
+
+    - name: Inject build version number (run_number -> CurrentVersion)
+      run: |
+        sed -i \
+          "s/CurrentVersion = [0-9]*;/CurrentVersion = ${{ github.run_number }};/" \
+          "${{ github.workspace }}/HTML2EXE 2.0/HTML2EXE.cs"
+
+    # -- Restore ---------------------------------------------------------------
+    - name: Restore NuGet dependencies
       run: dotnet restore -p:EnableWindowsTargeting=true
 
-    - name: Build main app (self-contained)
-      run: dotnet publish "HTML2EXE 2.0" -c Release -r win-x64 -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:InvariantGlobalization=true --self-contained true -o ./publish-big -p:EnableWindowsTargeting=true -p:DefineConstants="BIG_BUILD"
+    # -- Build: HTML2EXE-big (self-contained, includes .NET runtime) -----------
+    - name: Build HTML2EXE-big.exe [self-contained]
+      run: |
+        dotnet publish "${{ env.MAIN_PROJECT }}" \
+          -c Release -r win-x64 \
+          -p:PublishSingleFile=true \
+          -p:EnableCompressionInSingleFile=true \
+          -p:InvariantGlobalization=true \
+          -p:EnableWindowsTargeting=true \
+          -p:DefineConstants="BIG_BUILD" \
+          --self-contained true \
+          -o ./publish-big
 
     - name: Rename to HTML2EXE-big.exe
-      run: mv "./publish-big/HTML2EXE.exe" "./publish-big/HTML2EXE-big.exe"
+      run: mv ./publish-big/HTML2EXE.exe ./publish-big/HTML2EXE-big.exe
 
-    - name: Build WebView (self-contained)
-      run: dotnet publish HTML2EXE_Webview -c Release -r win-x64 -p:PublishSingleFile=true -p:InvariantGlobalization=true --self-contained true -o ./webview_publish_big -p:EnableWindowsTargeting=true
-
-    - name: Create webview-big.zip
+    # -- Build: WebView big (self-contained) -----------------------------------
+    - name: Build WebView [self-contained]
       run: |
-        cd webview_publish_big
+        dotnet publish "${{ env.WV_PROJECT }}" \
+          -c Release -r win-x64 \
+          -p:PublishSingleFile=true \
+          -p:InvariantGlobalization=true \
+          -p:EnableWindowsTargeting=true \
+          --self-contained true \
+          -o ./webview-publish-big
+
+    - name: Package webview-big.zip
+      run: |
+        cd webview-publish-big
         zip ../webview-big.zip Webview.exe WebView2Loader.dll
         cd ..
+
+    # -- Build: HTML2EXE standard (framework-dependent, requires .NET 8) -------
+    - name: Build HTML2EXE.exe [framework-dependent]
+      run: |
+        dotnet publish "${{ env.MAIN_PROJECT }}" \
+          -c Release -r win-x64 \
+          -p:PublishSingleFile=true \
+          -p:EnableWindowsTargeting=true \
+          --no-self-contained \
+          -o ./publish
+
+    # -- Build: WebView standard (framework-dependent) -------------------------
+    - name: Build WebView [framework-dependent]
+      run: |
+        dotnet publish "${{ env.WV_PROJECT }}" \
+          -c Release -r win-x64 \
+          -p:PublishSingleFile=true \
+          -p:EnableWindowsTargeting=true \
+          --no-self-contained \
+          -o ./webview-publish
+
+    - name: Package webview.zip
+      run: |
+        cd webview-publish
+        zip ../webview.zip Webview.exe WebView2Loader.dll
+        cd ..
+
+    # -- Offline variant: disable auto-update, then rebuild big ----------------
+    - name: Disable auto-update flag for offline build
+      run: |
+        sed -i \
+          "s/bool update = true;/bool update = false;/" \
+          "${{ github.workspace }}/HTML2EXE 2.0/HTML2EXE.cs"
+
+    - name: Build HTML2EXE-offline.exe [self-contained, no auto-update]
+      run: |
+        dotnet publish "${{ env.MAIN_PROJECT }}" \
+          -c Release -r win-x64 \
+          -p:PublishSingleFile=true \
+          -p:EnableCompressionInSingleFile=true \
+          -p:InvariantGlobalization=true \
+          -p:EnableWindowsTargeting=true \
+          -p:DefineConstants="BIG_BUILD" \
+          --self-contained true \
+          -o ./publish-offline
+
+    - name: Rename to HTML2EXE-offline.exe
+      run: mv ./publish-offline/HTML2EXE.exe ./publish-offline/HTML2EXE-offline.exe
+
+    # -- Upload artifacts ------------------------------------------------------
+    - name: Upload HTML2EXE.exe
+      uses: actions/upload-artifact@v4
+      with:
+        name: HTML2EXE
+        path: ./publish/HTML2EXE.exe
+        if-no-files-found: error
 
     - name: Upload HTML2EXE-big.exe
       uses: actions/upload-artifact@v4
       with:
         name: HTML2EXE-big
-        path: ./publish-big/*
+        path: ./publish-big/HTML2EXE-big.exe
+        if-no-files-found: error
 
-    - name: Upload webview-big.zip
+    - name: Upload HTML2EXE-offline.exe
       uses: actions/upload-artifact@v4
       with:
-        name: webview-big
-        path: ./webview-big.zip
-
-    - name: Build main app
-      run: dotnet publish "HTML2EXE 2.0" -c Release -r win-x64 -p:PublishSingleFile=true --no-self-contained -o ./publish -p:EnableWindowsTargeting=true
-
-    - name: Build WebView
-      run: dotnet publish HTML2EXE_Webview -c Release -r win-x64 -p:PublishSingleFile=true --no-self-contained -o ./webview_publish -p:EnableWindowsTargeting=true
-
-    - name: Create webview.zip
-      run: |
-        cd webview_publish
-        zip ../webview.zip Webview.exe WebView2Loader.dll
-        cd ..
-
-    - name: Upload HTML2EXE.exe
-      uses: actions/upload-artifact@v4
-      with:
-        name: HTML2EXE
-        path: ./publish/*
+        name: HTML2EXE-offline
+        path: ./publish-offline/HTML2EXE-offline.exe
+        if-no-files-found: error
 
     - name: Upload webview.zip
       uses: actions/upload-artifact@v4
       with:
         name: webview
         path: ./webview.zip
+        if-no-files-found: error
 
-    - name: Disable updates for offline build
-      run: sed -i 's/bool update = .*/bool update = false;/' '/home/runner/work/HTML2EXE-2.0/HTML2EXE-2.0/HTML2EXE 2.0/HTML2EXE.cs'
-
-    - name: Build main app (offline & self-contained)
-      run: dotnet publish "HTML2EXE 2.0" -c Release -r win-x64 -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:InvariantGlobalization=true --self-contained true -o ./publish-offline -p:EnableWindowsTargeting=true -p:DefineConstants="BIG_BUILD"
-
-    - name: Rename to HTML2EXE-offline.exe
-      run: mv "./publish-offline/HTML2EXE.exe" "./publish-offline/HTML2EXE-offline.exe"
-
-    - name: Upload HTML2EXE-offline.exe
+    - name: Upload webview-big.zip
       uses: actions/upload-artifact@v4
       with:
-        name: HTML2EXE-offline
-        path: ./publish-offline/*
+        name: webview-big
+        path: ./webview-big.zip
+        if-no-files-found: error
 
+    # -- Build summary ---------------------------------------------------------
+    - name: Write build summary
+      run: |
+        echo "## Build ${{ github.run_number }} succeeded" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Artifact | Type |" >> $GITHUB_STEP_SUMMARY
+        echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+        echo "| HTML2EXE.exe | Framework-dependent (requires .NET 8) |" >> $GITHUB_STEP_SUMMARY
+        echo "| HTML2EXE-big.exe | Self-contained (.NET bundled) |" >> $GITHUB_STEP_SUMMARY
+        echo "| HTML2EXE-offline.exe | Self-contained, no auto-update |" >> $GITHUB_STEP_SUMMARY
+        echo "| webview.zip | WebView runtime (framework-dependent) |" >> $GITHUB_STEP_SUMMARY
+        echo "| webview-big.zip | WebView runtime (self-contained) |" >> $GITHUB_STEP_SUMMARY
+
+# =============================================================================
+#  JOB 2 - RELEASE
+#  Downloads all build artifacts and publishes a tagged GitHub Release.
+# =============================================================================
   release:
     needs: build
     runs-on: ubuntu-latest
 
     steps:
-    - name: Create latest.json
-      run: |
-        echo "{
-          \"version\": ${{ github.run_number }},
-          \"update\": true,
-          \"url\": \"https://github.com/jgc777/HTML2EXE-2.0/releases/download/${{ github.run_number }}/HTML2EXE.exe\",
-          \"url_big\": \"https://github.com/jgc777/HTML2EXE-2.0/releases/download/${{ github.run_number }}/HTML2EXE-big.exe\"
-        }" > latest.json
 
-    - name: Download HTML2EXE-offline.exe artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: HTML2EXE-offline
-        path: ./app-offline
-    
-    - name: Download main app artifact
+    # -- Download every artifact from the build job ----------------------------
+    - name: Download HTML2EXE.exe
       uses: actions/download-artifact@v4
       with:
         name: HTML2EXE
-        path: ./app
+        path: ./dist/standard
 
-    - name: Download webview.zip artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: webview
-        path: ./
-
-    - name: Download HTML2EXE-big.exe artifact
+    - name: Download HTML2EXE-big.exe
       uses: actions/download-artifact@v4
       with:
         name: HTML2EXE-big
-        path: ./app-big
+        path: ./dist/big
 
-    - name: Download webview-big.zip artifact
+    - name: Download HTML2EXE-offline.exe
+      uses: actions/download-artifact@v4
+      with:
+        name: HTML2EXE-offline
+        path: ./dist/offline
+
+    - name: Download webview.zip
+      uses: actions/download-artifact@v4
+      with:
+        name: webview
+        path: ./dist
+
+    - name: Download webview-big.zip
       uses: actions/download-artifact@v4
       with:
         name: webview-big
-        path: ./
+        path: ./dist
 
+    # -- Generate latest.json for the in-app auto-updater ----------------------
+    - name: Generate latest.json
+      run: |
+        REPO="${{ github.repository }}"
+        RUN="${{ github.run_number }}"
+        printf '{\n  "version": %s,\n  "update": true,\n  "url": "https://github.com/%s/releases/download/%s/HTML2EXE.exe",\n  "url_big": "https://github.com/%s/releases/download/%s/HTML2EXE-big.exe"\n}\n' \
+          "$RUN" "$REPO" "$RUN" "$REPO" "$RUN" > ./dist/latest.json
+        cat ./dist/latest.json
+
+    # -- Compose release notes -------------------------------------------------
+    - name: Compose release notes
+      run: |
+        REPO="${{ github.repository }}"
+        RUN="${{ github.run_number }}"
+        {
+          printf "## HTML2EXE 2.%s\n\n" "$RUN"
+          printf "| Download | Description |\n"
+          printf "|---|---|\n"
+          printf "| [**HTML2EXE.exe**](https://github.com/%s/releases/download/%s/HTML2EXE.exe) | Requires [.NET 8.0 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0/runtime/desktop) — smallest download |\n" "$REPO" "$RUN"
+          printf "| [**HTML2EXE-big.exe**](https://github.com/%s/releases/download/%s/HTML2EXE-big.exe) | Self-contained — no .NET required |\n" "$REPO" "$RUN"
+          printf "| [**HTML2EXE-offline.exe**](https://github.com/%s/releases/download/%s/HTML2EXE-offline.exe) | Self-contained, no .NET, no auto-update |\n" "$REPO" "$RUN"
+          printf "| webview.zip | WebView2 runtime (framework-dependent) |\n"
+          printf "| webview-big.zip | WebView2 runtime (self-contained) |\n"
+          printf "| latest.json | Auto-update manifest |\n\n"
+          printf "### Changes\n"
+          printf "> %s\n" "${{ github.event.head_commit.message }}"
+          EXTRA="${{ github.event.inputs.release_notes }}"
+          [ -n "$EXTRA" ] && printf "> %s\n" "$EXTRA"
+        } > release_notes.md
+        cat release_notes.md
+
+    # -- Publish GitHub Release ------------------------------------------------
     - name: Create GitHub Release
       uses: ncipollo/release-action@v1
       with:
         name: "HTML2EXE 2.${{ github.run_number }}"
-        tag: ${{ github.run_number }}
-        body:  |
-            - **HTML2EXE.exe** and webview.zip (both require [.NET 8.0](https://dotnet.microsoft.com/en-us/download/dotnet/8.0/runtime/desktop)). To use it, just download [HTML2EXE.exe](https://github.com/jgc777/HTML2EXE-2.0/releases/latest/download/HTML2EXE.exe) and run it.
-            - **latest.json** (to auto-update)
-            - **HTML2EXE-big.exe** and webview-big.zip (both are self-contained and do not require .NET 8.0). To use it, just download [HTML2EXE-big.exe](https://github.com/jgc777/HTML2EXE-2.0/releases/latest/download/HTML2EXE-big.exe) and run it.
-            - **HTML2EXE-offline.exe** (does not update and does not require .NET 8.0). To use it, just download [HTML2EXE-offline.exe](https://github.com/jgc777/HTML2EXE-2.0/releases/latest/download/HTML2EXE-offline.exe) and run it.
-            > ${{ github.event.head_commit.message }}
+        tag: "${{ github.run_number }}"
+        bodyFile: release_notes.md
         token: ${{ secrets.GITHUB_TOKEN }}
         artifacts: |
-          ./app/HTML2EXE.exe
-          ./webview.zip
-          ./latest.json
-          ./app-big/HTML2EXE-big.exe
-          ./webview-big.zip
-          ./app-offline/HTML2EXE-offline.exe
+          ./dist/standard/HTML2EXE.exe
+          ./dist/big/HTML2EXE-big.exe
+          ./dist/offline/HTML2EXE-offline.exe
+          ./dist/webview.zip
+          ./dist/webview-big.zip
+          ./dist/latest.json
+        artifactErrorsFailBuild: true
