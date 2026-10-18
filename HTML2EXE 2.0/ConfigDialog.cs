@@ -1,4 +1,4 @@
-﻿using System.Text.Json.Nodes;
+using System.Text.Json.Nodes;
 
 namespace HTML2EXE_2
 {
@@ -141,8 +141,9 @@ namespace HTML2EXE_2
 
         private void saveConfigBtnClick(object sender, EventArgs e)
         {
-            jsonSaver.ShowDialog();
-            File.WriteAllText(jsonSaver.FileName, generateConfigJson(true, true).ToString()); // Generate and save the config
+            // BUG-06 FIX: Only write if the user actually confirmed a path in the dialog
+            if (jsonSaver.ShowDialog() == DialogResult.OK && !string.IsNullOrEmpty(jsonSaver.FileName))
+                File.WriteAllText(jsonSaver.FileName, generateConfigJson(true, true).ToString()); // Generate and save the config
         }
 
         private void webviewBtn_Click(object sender, EventArgs e)
@@ -160,7 +161,7 @@ namespace HTML2EXE_2
         private void removeWebviewBtn_Click(object sender, EventArgs e)
         {
             webviewOpener.FileName = null;
-            webviewPathLabel.Text = "No icon";
+            webviewPathLabel.Text = "Use default"; // BUG-07 FIX: was "No icon" (copy-paste typo)
             removeWebviewBtn.Visible = false;
             includeNETbox.Visible = true;
         }

@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -25,7 +25,8 @@ namespace HTML2EXE_2
         public static readonly int CurrentVersion = 0; // Updated by GitHub at build, version 0 also disables update check
         public static readonly string webview = "https://github.com/jgc777/HTML2EXE-2.0/releases/latest/download/webview.zip";
         public static readonly string webview_big = "https://github.com/jgc777/HTML2EXE-2.0/releases/latest/download/webview-big.zip";
-        public static string? webviewURL;
+        // BUG-02 FIX: Initialise to a safe default so webviewURL is never null if GUI flow hits an edge case
+        public static string webviewURL = IsBigBuild ? webview_big : webview;
 
         public static readonly string tmpPath = Path.Combine(Path.GetTempPath(), $"HTML2EXE\\{Guid.NewGuid():N}");
         public static readonly string tmpWebfilesPath = Path.Combine(tmpPath, "webfiles");
@@ -61,6 +62,20 @@ namespace HTML2EXE_2
                     Environment.Exit(0);
                 }
 
+                // BUG-14 FIX: Clean up any gui.flag leftover from a previous crash to prevent the next
+                // updater invocation from exiting prematurely
+                if (File.Exists(guiFlag)) File.Delete(guiFlag);
+
+                // BUG-14 FIX: Best-effort cleanup of orphaned temp sub-folders from previous runs
+                string tempParent = Path.GetDirectoryName(tmpPath)!; // = %TEMP%\HTML2EXE
+                if (Directory.Exists(tempParent))
+                {
+                    foreach (var staleDir in Directory.GetDirectories(tempParent))
+                    {
+                        try { Directory.Delete(staleDir, true); } catch { } // Best-effort; ignore locked dirs
+                    }
+                }
+
                 if (Directory.Exists(tmpPath)) Directory.Delete(tmpPath, true);
                 Directory.CreateDirectory(tmpPath);
                 Directory.CreateDirectory(tmpWebfilesPath);
@@ -79,7 +94,22 @@ namespace HTML2EXE_2
                     string? htmlPath = TryGetFileFolderPath(args[0]); // Try to get the file path from the first argument
                     if (string.IsNullOrEmpty(htmlPath)) throw new Exception($"HTML file/folder not found: {args[0]}"); // If the first argument is still not a file or folder, throw an error
                     if (Directory.Exists(htmlPath)) CopyDirectory(htmlPath, tmpWebfilesPath); // Copy directory to webfiles
-                    else File.Copy(htmlPath, Path.Combine(tmpWebfilesPath, Path.GetFileName(htmlPath)), true); // Copy file to webfiles
+                    else
+                    {
+                        // Copy the file's entire parent directory so all assets (images, CSS, JS, subfolders)
+                        // are included in the final EXE — not just the specified HTML file.
+                        // Safety guard: never copy a root/drive directory (e.g. C:\).
+                        string? parentDir = Path.GetDirectoryName(htmlPath);
+                        if (!string.IsNullOrEmpty(parentDir) && Path.GetPathRoot(parentDir) != parentDir)
+                        {
+                            log($"Including all files from parent folder: {parentDir}");
+                            CopyDirectory(parentDir, tmpWebfilesPath);
+                        }
+                        else
+                        {
+                            File.Copy(htmlPath, Path.Combine(tmpWebfilesPath, Path.GetFileName(htmlPath)), true); // Fallback: copy file only
+                        }
+                    }
 
                     // Copy config icon and modify config file
                     if (args.Length >= 3)
@@ -199,7 +229,10 @@ namespace HTML2EXE_2
             if (CurrentVersion != 0 && update) try
                 {
                     log("Checking for updates...");
-                    string json = await client.GetStringAsync(latestJsonUrl).ConfigureAwait(false);
+                    // BUG-10 FIX: Use a cancellation token with a 10-second timeout so slow
+                    // networks don't stall the startup indefinitely
+                    using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    string json = await client.GetStringAsync(latestJsonUrl, cts.Token).ConfigureAwait(false);
 
                     using JsonDocument doc = JsonDocument.Parse(json);
                     int latestVersion = doc.RootElement.GetProperty("version").GetInt32();
@@ -253,7 +286,7 @@ namespace HTML2EXE_2
                 if (!File.Exists(tmpWebviewPath)) // If the webview.zip file does not exist download it
                 {
                     log("Downloading webview.zip...");
-                    if (webviewURL is null) throw new Exception("Error: webview URL is null.");
+                    // webviewURL is guaranteed non-null from its initializer (BUG-02 fix)
                     var response = client.GetAsync(webviewURL).Result;
                     response.EnsureSuccessStatusCode();
                     var fileBytes = response.Content.ReadAsByteArrayAsync().Result;
@@ -328,23 +361,32 @@ SourceFiles0=.\
             ZipFile.CreateFromDirectory(tmpWebfilesPath, Path.Combine(tmpPath, "webfiles.zip"), CompressionLevel.SmallestSize, true);
 
             log("Building...");
+            string savedDir = Environment.CurrentDirectory; // BUG-04 FIX: Save before mutating
             using (Process iexpress = new Process())
             {
-                Environment.CurrentDirectory = tmpPath; // Fix IExpress SED loading error (WorkingDirectory is ignored)
-                iexpress.StartInfo = new ProcessStartInfo
+                // BUG-04 FIX: Restore CurrentDirectory in finally so any exception during build
+                // doesn't leave the process in the wrong directory for subsequent operations
+                try
                 {
-                    FileName = "iexpress",
-                    Arguments = $"/N /M HTML2EXE.sed", // Use /Q instead of /M to suppress the IExpress GUI and error messages
-                    CreateNoWindow = true,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                };
-                iexpress.Start();
-                iexpress.WaitForExit();
-                if (iexpress.ExitCode != 0) throw new Exception($"Building failed with exit code {iexpress.ExitCode}.");
-                log($"IExpress finished OK");
-                Environment.CurrentDirectory = AppDomain.CurrentDomain.BaseDirectory;
+                    Environment.CurrentDirectory = tmpPath; // Fix IExpress SED loading error (WorkingDirectory is ignored)
+                    iexpress.StartInfo = new ProcessStartInfo
+                    {
+                        FileName = "iexpress",
+                        Arguments = $"/N /M HTML2EXE.sed", // Use /Q instead of /M to suppress the IExpress GUI and error messages
+                        CreateNoWindow = true,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
+                    iexpress.Start();
+                    iexpress.WaitForExit();
+                    if (iexpress.ExitCode != 0) throw new Exception($"Building failed with exit code {iexpress.ExitCode}.");
+                    log($"IExpress finished OK");
+                }
+                finally
+                {
+                    Environment.CurrentDirectory = savedDir; // Always restore, even if build threw
+                }
             }
 
             string? configIcon = config?["icon"]?.ToString();

@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 
 namespace HTML2EXE_2
@@ -14,7 +14,12 @@ namespace HTML2EXE_2
         {
             Text = $"HTML2EXE 2.0 v{(HTML2EXE.IsBigBuild ? $"{HTML2EXE.CurrentVersion} (BIG)" : HTML2EXE.CurrentVersion)}";
             Visible = true;
-            JsonNode config = JsonNode.Parse(File.ReadAllText(HTML2EXE.tmpConfigJson)) ?? new JsonObject();
+
+            // BUG-01 FIX: Guard against missing config file (e.g. user cancelled before saving)
+            JsonNode config = File.Exists(HTML2EXE.tmpConfigJson)
+                ? JsonNode.Parse(File.ReadAllText(HTML2EXE.tmpConfigJson)) ?? new JsonObject()
+                : new JsonObject();
+
             string output = Path.Combine(Environment.CurrentDirectory, (config["title"]?.ToString() is not null) ? $"{config["title"]!.ToString()}.exe" : "out.exe");
             // Set the output path using the config title or default to "out.exe"
             try

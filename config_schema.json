@@ -31,7 +31,7 @@
             "type": "boolean",
             "description": "If the window should be always on top."
         },
-        "zoomcontrol": {
+        "zoom_control": {
             "type": "boolean",
             "description": "If the zoom control should be enabled."
         },

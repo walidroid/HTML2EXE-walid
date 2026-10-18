@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -9,6 +9,9 @@ namespace Webview
     [SupportedOSPlatform("windows6.1")] // Remove warnings
     public partial class WebviewForm : Form
     {
+        // BUG-03 FIX: Use a shared static HttpClient instead of creating one per navigation (resource leak)
+        private static readonly HttpClient _httpClient = new();
+
         JsonNode config = new JsonObject();
         public bool isFullscreen = false;
         private FormWindowState previousWindowState;
@@ -46,25 +49,26 @@ namespace Webview
                     string[] filesInWebfiles = Directory.EnumerateFiles(Webview.webfilesPath).ToArray(); // Get all files in webfiles folder
                     var htmlFiles = filesInWebfiles.Where(file => file.EndsWith(".html", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".htm", StringComparison.OrdinalIgnoreCase)).ToArray(); // Get all HTML files in webfiles folder
 
-                    // First priority: If there is only one file, use it
+                    // BUG-09 FIX: Proper if/else-if chain — index.html takes priority over any arbitrary single HTML file
+                    // Priority 1: Only one file total → use it
                     if (filesInWebfiles.Length == 1)
                         url = filesInWebfiles.First();
-                    // Second priority: If there is only one HTML file, use it
-                    if (htmlFiles.Length == 1)
-                        url = htmlFiles.First();
-                    // Third priority: If there is a index.html file, use it
+                    // Priority 2: index.html exists → use it
                     else if (File.Exists(Path.Combine(Webview.webfilesPath, "index.html")))
                         url = Path.Combine(Webview.webfilesPath, "index.html");
-                    // Fourth priority: If there is a index.htm file, use it
+                    // Priority 3: index.htm exists → use it
                     else if (File.Exists(Path.Combine(Webview.webfilesPath, "index.htm")))
                         url = Path.Combine(Webview.webfilesPath, "index.htm");
-                    // Fifth priority: if there are 2 files in webfiles and only one is not an .ico file, use the other file
+                    // Priority 4: Only one HTML file → use it
+                    else if (htmlFiles.Length == 1)
+                        url = htmlFiles.First();
+                    // Priority 5: 2 files with one .ico → use the non-ico file
                     else if (filesInWebfiles.Length == 2 // 2 files
                         && filesInWebfiles.Any(file => file.EndsWith(".ico", StringComparison.OrdinalIgnoreCase)) // At least one is an .ico file
                         && filesInWebfiles.FirstOrDefault(file => !file.EndsWith(".ico", StringComparison.OrdinalIgnoreCase)) is var nonIcoFile // Get the first file that is not an .ico file
                         && nonIcoFile is not null)
                         url = nonIcoFile; // Use the non-ico file
-                    // Sixth priority: If there are HTML files, use the first one found
+                    // Priority 6: Any HTML files → use the first one found
                     else if (htmlFiles.Length > 0)
                         url = htmlFiles.First();
 
@@ -126,7 +130,7 @@ namespace Webview
 
                 TopMost = config["always_on_top"]?.GetValue<bool>() ?? false; // Always on top
 
-                webView2.CoreWebView2.ContainsFullScreenElementChanged += fulscreenUpdate;
+                webView2.CoreWebView2.ContainsFullScreenElementChanged += fullscreenUpdate; // BUG-12 FIX: was misnamed "fulscreenUpdate"
 
                 webView2.Visible = true; // Show WebView
 
@@ -183,9 +187,9 @@ namespace Webview
             if (FormBorderStyle == FormBorderStyle.None) exitFullscreen();
             else enterFullscreen();
         }
-        private void fulscreenUpdate(object? sender, object e)
+        private void fullscreenUpdate(object? sender, object e)
         { // Fullscreen change event
-            if (config["fullscreen"]?.GetValue<bool>() ?? true) return; // If fullscreen is forced in config return
+            if (config["fullscreen"]?.GetValue<bool>() ?? false) return; // BUG-13 FIX: was "?? true" which blocked web-page fullscreen by default when config key was absent
             if (webView2.CoreWebView2.ContainsFullScreenElement) enterFullscreen();
             else exitFullscreen();
         }
@@ -214,8 +218,8 @@ namespace Webview
                     faviconUrl = $"{uri.Scheme}://{uri.Host}/favicon.ico";
                 }
 
-                HttpClient client = new HttpClient();
-                MemoryStream ms = new MemoryStream(await client.GetByteArrayAsync(faviconUrl));
+                // BUG-03 FIX: Use the shared static _httpClient instead of creating a new one per navigation
+                MemoryStream ms = new MemoryStream(await _httpClient.GetByteArrayAsync(faviconUrl));
                 Icon icon;
                 try
                 {

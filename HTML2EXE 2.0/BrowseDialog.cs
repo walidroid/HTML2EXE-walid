@@ -1,4 +1,4 @@
-﻿
+
 using System.Diagnostics;
 
 namespace HTML2EXE_2
@@ -23,11 +23,20 @@ namespace HTML2EXE_2
             string htmlPath = openFileDialog1.FileName;
             if (File.Exists(htmlPath))
             {
-                File.Copy(htmlPath, Path.Combine(HTML2EXE.tmpWebfilesPath, Path.GetFileName(htmlPath)), true);
+                // Copy the file's entire parent directory so all assets (images, CSS, JS, subfolders)
+                // are included in the final EXE — not just the selected HTML file.
+                // Safety guard: never copy a root/drive directory (e.g. C:\).
+                string? parentDir = Path.GetDirectoryName(htmlPath);
+                if (!string.IsNullOrEmpty(parentDir) && Path.GetPathRoot(parentDir) != parentDir)
+                    HTML2EXE.CopyDirectory(parentDir, HTML2EXE.tmpWebfilesPath);
+                else
+                    File.Copy(htmlPath, Path.Combine(HTML2EXE.tmpWebfilesPath, Path.GetFileName(htmlPath)), true);
+
                 Visible = false;
                 configDialog.ShowDialog();
+                Close(); // BUG-11 FIX: Only close after a successful selection, not on cancel
             }
-            Close();
+            // If no file was selected the dialog stays open so the user can try again
         }
 
         private void selectFolderBtn_Click(object sender, EventArgs e)
@@ -41,8 +50,9 @@ namespace HTML2EXE_2
 
                 Visible = false;
                 configDialog.ShowDialog();
+                Close(); // BUG-11 FIX: Only close after a successful selection, not on cancel
             }
-            Close();
+            // If no folder was selected the dialog stays open so the user can try again
         }
 
         private void noFileBtn_Click_1(object sender, EventArgs e)
