@@ -325,9 +325,9 @@ VersionInfo=VersionSection
 Internalname={Path.GetFileName(output)}
 OriginalFilename={Path.GetFileName(output)}
 FileDescription=%FileDesc%
-CompanyName={config["title"]?.ToString() ?? "Jgc7"}
-ProductName={config["title"]?.ToString() ?? "HTML2EXE - Set title to change"}
-LegalCopyright=Copyright {DateTime.Now.Year} {config["title"]?.ToString() ?? "Jgc7"}
+CompanyName={config["title"]?.ToString() ?? "HTML2EXE"}
+ProductName={config["title"]?.ToString() ?? "HTML2EXE Application"}
+LegalCopyright=Copyright {DateTime.Now.Year} {config["title"]?.ToString() ?? "HTML2EXE"}
 [Strings]
 FileDesc={config["title"]?.ToString() ?? "HTML2EXE 2.0"}
 InstallPrompt=

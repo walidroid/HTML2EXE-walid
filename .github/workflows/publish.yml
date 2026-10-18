@@ -87,7 +87,6 @@ jobs:
         dotnet publish "${{ env.MAIN_PROJECT }}" \
           -c Release -r win-x64 \
           -p:PublishSingleFile=true \
-          -p:EnableCompressionInSingleFile=true \
           -p:InvariantGlobalization=true \
           -p:EnableWindowsTargeting=true \
           -p:DefineConstants="BIG_BUILD" \
@@ -152,7 +151,6 @@ jobs:
         dotnet publish "${{ env.MAIN_PROJECT }}" \
           -c Release -r win-x64 \
           -p:PublishSingleFile=true \
-          -p:EnableCompressionInSingleFile=true \
           -p:InvariantGlobalization=true \
           -p:EnableWindowsTargeting=true \
           -p:DefineConstants="BIG_BUILD" \
