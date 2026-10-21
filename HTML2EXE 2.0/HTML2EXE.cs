@@ -30,6 +30,7 @@ namespace HTML2EXE_2
         public static string webviewURL = IsBigBuild ? webview_big : webview;
 
         public static readonly string baseAppDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HTML2EXE");
+        public static readonly string cacheDir = Path.Combine(baseAppDir, "cache");
         public static readonly string tmpPath = Path.Combine(baseAppDir, $"build_{Guid.NewGuid():N}");
         public static readonly string tmpWebfilesPath = Path.Combine(tmpPath, "webfiles");
 
@@ -68,15 +69,17 @@ namespace HTML2EXE_2
                 // updater invocation from exiting prematurely
                 if (File.Exists(guiFlag)) File.Delete(guiFlag);
 
-                // Best-effort cleanup of orphaned build sub-folders from previous runs
+                // Best-effort cleanup of orphaned build sub-folders from previous runs (preserves cache folder)
                 if (Directory.Exists(baseAppDir))
                 {
                     foreach (var staleDir in Directory.GetDirectories(baseAppDir))
                     {
+                        if (string.Equals(staleDir, cacheDir, StringComparison.OrdinalIgnoreCase)) continue;
                         try { Directory.Delete(staleDir, true); } catch { } // Best-effort; ignore locked dirs
                     }
                 }
 
+                Directory.CreateDirectory(cacheDir);
                 if (Directory.Exists(tmpPath)) Directory.Delete(tmpPath, true);
                 Directory.CreateDirectory(tmpPath);
                 Directory.CreateDirectory(tmpWebfilesPath);
@@ -284,19 +287,68 @@ namespace HTML2EXE_2
             JsonNode config = hasConfig ? JsonNode.Parse(File.ReadAllText(tmpConfigJson)) ?? new JsonObject() : new JsonObject(); // Parse the config file if it exists, otherwise create a new JsonObject
             if (!File.Exists(Path.Combine(tmpPath, "Webview.exe"))) // If there is no Webview.exe in the tmpPath
             {
-                if (!File.Exists(tmpWebviewPath)) // If the webview.zip file does not exist download it
+                // If a local webview.zip was supplied via CLI (args[3]), extract it directly
+                if (File.Exists(tmpWebviewPath))
                 {
-                    log("Downloading webview.zip...");
-                    // webviewURL is guaranteed non-null from its initializer (BUG-02 fix)
-                    var response = client.GetAsync(webviewURL).Result;
-                    response.EnsureSuccessStatusCode();
-                    var fileBytes = response.Content.ReadAsByteArrayAsync().Result;
-                    File.WriteAllBytes(tmpWebviewPath, fileBytes);
+                    log("Extracting provided local webview.zip...");
+                    ZipFile.ExtractToDirectory(tmpWebviewPath, tmpPath, true);
+                    File.Delete(tmpWebviewPath);
                 }
+                else
+                {
+                    Directory.CreateDirectory(cacheDir);
 
-                log("Extracting webview.zip...");
-                ZipFile.ExtractToDirectory(tmpWebviewPath, tmpPath);
-                File.Delete(tmpWebviewPath);
+                    // Determine archive name from URL (e.g. webview.zip or webview-big.zip)
+                    string zipName = "webview.zip";
+                    try
+                    {
+                        if (Uri.TryCreate(webviewURL, UriKind.Absolute, out Uri? uri))
+                        {
+                            string seg = Path.GetFileName(uri.AbsolutePath);
+                            if (!string.IsNullOrEmpty(seg)) zipName = seg;
+                        }
+                    }
+                    catch { }
+
+                    string cachedZipPath = Path.Combine(cacheDir, zipName);
+
+                    // Download once if not present in cache
+                    if (!File.Exists(cachedZipPath))
+                    {
+                        log($"Downloading {zipName} (first time only, caching for future builds)...");
+                        var response = client.GetAsync(webviewURL).Result;
+                        response.EnsureSuccessStatusCode();
+                        var fileBytes = response.Content.ReadAsByteArrayAsync().Result;
+
+                        string tempDownloadPath = Path.Combine(cacheDir, $"{zipName}.download_{Guid.NewGuid():N}");
+                        File.WriteAllBytes(tempDownloadPath, fileBytes);
+                        File.Move(tempDownloadPath, cachedZipPath, true);
+                        log($"Cached {zipName} successfully.");
+                    }
+                    else
+                    {
+                        log($"Using cached {zipName} (skipping download)...", false, true);
+                    }
+
+                    log($"Extracting {zipName}...");
+                    try
+                    {
+                        ZipFile.ExtractToDirectory(cachedZipPath, tmpPath, true);
+                    }
+                    catch (InvalidDataException)
+                    {
+                        // Cache file was corrupted; re-download fresh
+                        log($"Warning: Cached {zipName} was corrupted. Re-downloading...", true);
+                        if (File.Exists(cachedZipPath)) File.Delete(cachedZipPath);
+
+                        var response = client.GetAsync(webviewURL).Result;
+                        response.EnsureSuccessStatusCode();
+                        var fileBytes = response.Content.ReadAsByteArrayAsync().Result;
+                        File.WriteAllBytes(cachedZipPath, fileBytes);
+
+                        ZipFile.ExtractToDirectory(cachedZipPath, tmpPath, true);
+                    }
+                }
             }
             string iexpressConfig = $@"[Version]
 Class=IEXPRESS
