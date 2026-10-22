@@ -18,8 +18,6 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-#include <fstream>
-#include <sstream>
 #include <utility>
 
 // WebView2 header provided by NuGet package in CI or local build
@@ -52,18 +50,17 @@ public:
     explicit operator bool() const { return m_ptr != nullptr; }
 };
 
-// ── Lightweight COM Callback implementation (no WRL dependency) ───────────────
+// ── COM Callback Handlers for WebView2 Events ─────────────────────────────────
 
-template <typename TInterface, typename F>
-class CallbackImpl : public TInterface {
-    F m_func;
+template <typename F>
+class EnvCompletedHandler : public ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler {
+    F m_fn;
     ULONG m_ref = 1;
 public:
-    CallbackImpl(F&& func) : m_func(std::move(func)) {}
-
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+    EnvCompletedHandler(F&& fn) : m_fn(std::forward<F>(fn)) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** ppv) override {
         if (!ppv) return E_POINTER;
-        *ppv = static_cast<TInterface*>(this);
+        *ppv = static_cast<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler*>(this);
         AddRef();
         return S_OK;
     }
@@ -73,15 +70,121 @@ public:
         if (r == 0) delete this;
         return r;
     }
-    template <typename... Args>
-    HRESULT STDMETHODCALLTYPE Invoke(Args... args) override {
-        return m_func(args...);
+    HRESULT STDMETHODCALLTYPE Invoke(HRESULT hr, ICoreWebView2Environment* env) override {
+        return m_fn(hr, env);
     }
 };
+template <typename F>
+auto MakeEnvHandler(F&& fn) {
+    return new EnvCompletedHandler<typename std::decay<F>::type>(std::forward<F>(fn));
+}
 
-template <typename TInterface, typename F>
-TInterface* MakeCallback(F&& func) {
-    return new CallbackImpl<TInterface, typename std::decay<F>::type>(std::forward<F>(func));
+template <typename F>
+class CtrlCompletedHandler : public ICoreWebView2CreateCoreWebView2ControllerCompletedHandler {
+    F m_fn;
+    ULONG m_ref = 1;
+public:
+    CtrlCompletedHandler(F&& fn) : m_fn(std::forward<F>(fn)) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = static_cast<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++m_ref; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG r = --m_ref;
+        if (r == 0) delete this;
+        return r;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(HRESULT hr, ICoreWebView2Controller* ctrl) override {
+        return m_fn(hr, ctrl);
+    }
+};
+template <typename F>
+auto MakeCtrlHandler(F&& fn) {
+    return new CtrlCompletedHandler<typename std::decay<F>::type>(std::forward<F>(fn));
+}
+
+template <typename F>
+class TitleChangedHandler : public ICoreWebView2DocumentTitleChangedEventHandler {
+    F m_fn;
+    ULONG m_ref = 1;
+public:
+    TitleChangedHandler(F&& fn) : m_fn(std::forward<F>(fn)) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = static_cast<ICoreWebView2DocumentTitleChangedEventHandler*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++m_ref; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG r = --m_ref;
+        if (r == 0) delete this;
+        return r;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* wv, IUnknown* args) override {
+        return m_fn(wv, args);
+    }
+};
+template <typename F>
+auto MakeTitleHandler(F&& fn) {
+    return new TitleChangedHandler<typename std::decay<F>::type>(std::forward<F>(fn));
+}
+
+template <typename F>
+class FullScreenChangedHandler : public ICoreWebView2ContainsFullScreenElementChangedEventHandler {
+    F m_fn;
+    ULONG m_ref = 1;
+public:
+    FullScreenChangedHandler(F&& fn) : m_fn(std::forward<F>(fn)) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = static_cast<ICoreWebView2ContainsFullScreenElementChangedEventHandler*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++m_ref; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG r = --m_ref;
+        if (r == 0) delete this;
+        return r;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* wv, IUnknown* args) override {
+        return m_fn(wv, args);
+    }
+};
+template <typename F>
+auto MakeFullScreenHandler(F&& fn) {
+    return new FullScreenChangedHandler<typename std::decay<F>::type>(std::forward<F>(fn));
+}
+
+template <typename F>
+class AccelKeyPressedHandler : public ICoreWebView2AcceleratorKeyPressedEventHandler {
+    F m_fn;
+    ULONG m_ref = 1;
+public:
+    AccelKeyPressedHandler(F&& fn) : m_fn(std::forward<F>(fn)) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = static_cast<ICoreWebView2AcceleratorKeyPressedEventHandler*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++m_ref; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG r = --m_ref;
+        if (r == 0) delete this;
+        return r;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2Controller* ctrl, ICoreWebView2AcceleratorKeyPressedEventArgs* args) override {
+        return m_fn(ctrl, args);
+    }
+};
+template <typename F>
+auto MakeAccelHandler(F&& fn) {
+    return new AccelKeyPressedHandler<typename std::decay<F>::type>(std::forward<F>(fn));
 }
 
 // ── Tiny JSON parser ──────────────────────────────────────────────────────────
@@ -162,9 +265,20 @@ static std::wstring AppDataDir_(const std::wstring& name)
 
 static std::string ReadFileUtf8_(const std::wstring& p)
 {
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return "";
-    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    HANDLE hFile = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return "";
+    DWORD size = GetFileSize(hFile, nullptr);
+    if (size == 0 || size == INVALID_FILE_SIZE) {
+        CloseHandle(hFile);
+        return "";
+    }
+    std::string s(size, '\0');
+    DWORD read = 0;
+    ReadFile(hFile, &s[0], size, &read, nullptr);
+    CloseHandle(hFile);
+    s.resize(read);
+    return s;
 }
 
 static std::wstring ToLower_(std::wstring s)
@@ -224,10 +338,8 @@ static bool RunHiddenCmd(const std::wstring& cmd, const std::wstring& workDir = 
 
 static void ExtractZip_(const std::wstring& zipPath, const std::wstring& destDir)
 {
-    // Try built-in tar.exe first (native on Windows 10 1803+ / Windows 11)
     std::wstring tarCmd = L"tar.exe -xf \"" + zipPath + L"\" -C \"" + destDir + L"\"";
     if (!RunHiddenCmd(tarCmd, destDir)) {
-        // Fallback: PowerShell Expand-Archive
         std::wstring psCmd = L"powershell.exe -NoProfile -NonInteractive -Command \"Expand-Archive -Force -LiteralPath '"
                            + zipPath + L"' -DestinationPath '" + destDir + L"'\"";
         RunHiddenCmd(psCmd, destDir);
@@ -418,7 +530,7 @@ static void InitWebView()
         return;
     }
 
-    auto envHandler = MakeCallback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+    auto envHandler = MakeEnvHandler(
         [url](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
             if (FAILED(hr) || !env) {
                 MessageBoxW(G.hwnd,
@@ -430,7 +542,7 @@ static void InitWebView()
 
             G.env = env;
 
-            auto ctrlHandler = MakeCallback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+            auto ctrlHandler = MakeCtrlHandler(
                 [url](HRESULT hr, ICoreWebView2Controller* ctrl) -> HRESULT {
                     if (FAILED(hr) || !ctrl) {
                         PostQuitMessage(1);
@@ -452,7 +564,7 @@ static void InitWebView()
 
                     // Dynamic title sync if title not hardcoded in config
                     if (JsonGetString(G.cfg, "title").empty()) {
-                        auto titleHandler = MakeCallback<ICoreWebView2DocumentTitleChangedEventHandler>(
+                        auto titleHandler = MakeTitleHandler(
                             [](ICoreWebView2* wv, IUnknown*) -> HRESULT {
                                 LPWSTR docTitle = nullptr;
                                 wv->get_DocumentTitle(&docTitle);
@@ -466,7 +578,7 @@ static void InitWebView()
                     }
 
                     // Track HTML5 video/element fullscreen events
-                    auto fsHandler = MakeCallback<ICoreWebView2ContainsFullScreenElementChangedEventHandler>(
+                    auto fsHandler = MakeFullScreenHandler(
                         [](ICoreWebView2* wv, IUnknown*) -> HRESULT {
                             if (G.cfgFullscreen) return S_OK;
                             BOOL full = FALSE;
@@ -477,7 +589,7 @@ static void InitWebView()
                     G.wv->add_ContainsFullScreenElementChanged(fsHandler, nullptr);
 
                     // Keyboard shortcuts while webview has focus (F11 fullscreen, Escape exit)
-                    auto accelHandler = MakeCallback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
+                    auto accelHandler = MakeAccelHandler(
                         [](ICoreWebView2Controller*, ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
                             COREWEBVIEW2_KEY_EVENT_KIND kind;
                             args->get_KeyEventKind(&kind);
