@@ -1,0 +1,7 @@
+// resource.rc - Windows resource file for HTML2EXE Native WebView Host
+// Embeds the application manifest for proper DPI/UAC/Windows-version handling.
+
+#include <windows.h>
+
+// Embed the manifest
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"

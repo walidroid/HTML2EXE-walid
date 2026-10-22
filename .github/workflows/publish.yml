@@ -33,11 +33,15 @@ permissions:
 env:
   DOTNET_VERSION: '8.0.x'
   MAIN_PROJECT:   'HTML2EXE 2.0'
-  WV_PROJECT:     'HTML2EXE_Webview'
+  # Native C++ webview project directory
+  CPP_WV_DIR:     'HTML2EXE_Native_Webview'
+  # WebView2 NuGet package (provides headers + WebView2Loader.dll.lib)
+  WV2_PKG:        'Microsoft.Web.WebView2'
+  WV2_VERSION:    '1.0.2849.39'
 
 # =============================================================================
 #  JOB 1 - BUILD
-#  Compiles all three release variants of the compiler and both WebView zips.
+#  Compiles all three release variants of the compiler + native C++ WebView.
 # =============================================================================
 jobs:
   build:
@@ -54,6 +58,9 @@ jobs:
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: ${{ env.DOTNET_VERSION }}
+
+    - name: Install MinGW-w64 cross-compiler
+      run: sudo apt-get install -y mingw-w64
 
     - name: Download rcedit (Windows PE icon editor)
       run: |
@@ -81,6 +88,43 @@ jobs:
     - name: Restore NuGet dependencies
       run: dotnet restore -p:EnableWindowsTargeting=true
 
+    # -- Download WebView2 SDK (NuGet) for native C++ build --------------------
+    - name: Download WebView2 NuGet package
+      run: |
+        mkdir -p webview2-sdk
+        curl -fsSL \
+          "https://www.nuget.org/api/v2/package/${{ env.WV2_PKG }}/${{ env.WV2_VERSION }}" \
+          -o webview2-nupkg.zip
+        unzip -q webview2-nupkg.zip -d webview2-sdk
+        echo "WebView2 SDK extracted:"
+        ls webview2-sdk/build/native/include/ | head -5
+        ls webview2-sdk/build/native/x64/     | head -5
+
+    # -- Build: Native C++ WebView Host ----------------------------------------
+    - name: Build native C++ Webview.exe (zero .NET)
+      run: |
+        cd "${{ env.CPP_WV_DIR }}"
+        make \
+          CC=x86_64-w64-mingw32-g++ \
+          RC=x86_64-w64-mingw32-windres \
+          WV2_SDK="${{ github.workspace }}/webview2-sdk"
+        ls -lh Webview.exe
+
+    - name: Copy WebView2Loader.dll alongside Webview.exe
+      run: |
+        cp webview2-sdk/build/native/x64/WebView2Loader.dll \
+           "${{ env.CPP_WV_DIR }}/WebView2Loader.dll"
+
+    # -- Package webview zips (same layout as before, one zip for all variants)
+    #    The native binary has zero .NET, so one zip covers all use cases.
+    - name: Package webview.zip (native C++)
+      run: |
+        cd "${{ env.CPP_WV_DIR }}"
+        zip ../webview.zip Webview.exe WebView2Loader.dll
+        # Alias: webview-big.zip is identical – same binary, no .NET to bundle
+        cp ../webview.zip ../webview-big.zip
+        cd ..
+
     # -- Build: HTML2EXE-big (self-contained, includes .NET runtime) -----------
     - name: Build HTML2EXE-big.exe [self-contained]
       run: |
@@ -96,23 +140,6 @@ jobs:
     - name: Rename to HTML2EXE-big.exe
       run: mv ./publish-big/HTML2EXE.exe ./publish-big/HTML2EXE-big.exe
 
-    # -- Build: WebView big (self-contained) -----------------------------------
-    - name: Build WebView [self-contained]
-      run: |
-        dotnet publish "${{ env.WV_PROJECT }}" \
-          -c Release -r win-x64 \
-          -p:PublishSingleFile=true \
-          -p:InvariantGlobalization=true \
-          -p:EnableWindowsTargeting=true \
-          --self-contained true \
-          -o ./webview-publish-big
-
-    - name: Package webview-big.zip
-      run: |
-        cd webview-publish-big
-        zip ../webview-big.zip Webview.exe WebView2Loader.dll
-        cd ..
-
     # -- Build: HTML2EXE standard (framework-dependent, requires .NET 8) -------
     - name: Build HTML2EXE.exe [framework-dependent]
       run: |
@@ -122,22 +149,6 @@ jobs:
           -p:EnableWindowsTargeting=true \
           --no-self-contained \
           -o ./publish
-
-    # -- Build: WebView standard (framework-dependent) -------------------------
-    - name: Build WebView [framework-dependent]
-      run: |
-        dotnet publish "${{ env.WV_PROJECT }}" \
-          -c Release -r win-x64 \
-          -p:PublishSingleFile=true \
-          -p:EnableWindowsTargeting=true \
-          --no-self-contained \
-          -o ./webview-publish
-
-    - name: Package webview.zip
-      run: |
-        cd webview-publish
-        zip ../webview.zip Webview.exe WebView2Loader.dll
-        cd ..
 
     # -- Offline variant: disable auto-update, then rebuild big ----------------
     - name: Disable auto-update flag for offline build
@@ -206,8 +217,8 @@ jobs:
         echo "| HTML2EXE.exe | Framework-dependent (requires .NET 8) |" >> $GITHUB_STEP_SUMMARY
         echo "| HTML2EXE-big.exe | Self-contained (.NET bundled) |" >> $GITHUB_STEP_SUMMARY
         echo "| HTML2EXE-offline.exe | Self-contained, no auto-update |" >> $GITHUB_STEP_SUMMARY
-        echo "| webview.zip | WebView runtime (framework-dependent) |" >> $GITHUB_STEP_SUMMARY
-        echo "| webview-big.zip | WebView runtime (self-contained) |" >> $GITHUB_STEP_SUMMARY
+        echo "| webview.zip | Native C++ WebView2 host (~200 KB, zero .NET) |" >> $GITHUB_STEP_SUMMARY
+        echo "| webview-big.zip | Same native C++ binary (alias) |" >> $GITHUB_STEP_SUMMARY
 
 # =============================================================================
 #  JOB 2 - RELEASE
@@ -273,6 +284,7 @@ jobs:
         RUN="${{ github.run_number }}"
         {
           printf "## HTML2EXE 2.%s\n\n" "$RUN"
+          printf "### 🚀 WebView host: **Native C++ — zero .NET dependency**\n\n"
           printf "| Download | Description |\n"
           printf "|---|---|\n"
           printf "| [**HTML2EXE-big.zip**](https://github.com/%s/releases/download/%s/HTML2EXE-big.zip) ⭐ | **Recommended** (Self-contained, avoids browser warnings) |\n" "$REPO" "$RUN"
@@ -280,8 +292,8 @@ jobs:
           printf "| [**HTML2EXE.zip**](https://github.com/%s/releases/download/%s/HTML2EXE.zip) | Framework-dependent zip (requires .NET 8) |\n" "$REPO" "$RUN"
           printf "| [**HTML2EXE.exe**](https://github.com/%s/releases/download/%s/HTML2EXE.exe) | Framework-dependent executable |\n" "$REPO" "$RUN"
           printf "| [**HTML2EXE-offline.zip**](https://github.com/%s/releases/download/%s/HTML2EXE-offline.zip) | Offline zip (no auto-update) |\n" "$REPO" "$RUN"
-          printf "| webview.zip | WebView2 runtime (framework-dependent) |\n"
-          printf "| webview-big.zip | WebView2 runtime (self-contained) |\n"
+          printf "| webview.zip | Native C++ WebView2 host (~200 KB, **zero .NET**) |\n"
+          printf "| webview-big.zip | Same native C++ binary (alias) |\n"
           printf "| latest.json | Auto-update manifest |\n\n"
           printf "### Changes\n"
           printf "> %s\n" "${{ github.event.head_commit.message }}"
