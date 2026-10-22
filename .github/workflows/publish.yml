@@ -96,9 +96,10 @@ jobs:
           "https://www.nuget.org/api/v2/package/${{ env.WV2_PKG }}/${{ env.WV2_VERSION }}" \
           -o webview2-nupkg.zip
         unzip -q webview2-nupkg.zip -d webview2-sdk
-        echo "WebView2 SDK extracted:"
-        ls webview2-sdk/build/native/include/ | head -5
-        ls webview2-sdk/build/native/x64/     | head -5
+        cp "${{ github.workspace }}/${{ env.CPP_WV_DIR }}/EventToken.h" \
+           webview2-sdk/build/native/include/EventToken.h
+        echo "WebView2 SDK extracted and EventToken.h installed:"
+        ls webview2-sdk/build/native/include/ | head -6
 
     # -- Build: Native C++ WebView Host ----------------------------------------
     - name: Build native C++ Webview.exe (zero .NET)

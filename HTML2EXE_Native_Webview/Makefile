@@ -26,11 +26,13 @@ CXXFLAGS = \
   -std=c++17 \
   -O2 \
   -Wall \
+  -Wno-unknown-pragmas \
   -mwindows \
   -DUNICODE \
   -D_UNICODE \
   -DWINVER=0x0601 \
   -D_WIN32_WINNT=0x0601 \
+  -I. \
   -I$(WV2_INC)
 
 LDFLAGS = \
@@ -50,8 +52,8 @@ all: $(TARGET)
 $(RES_OBJ): $(RES_SRC) app.manifest
 	$(RC) -o $@ $<
 
-$(TARGET): $(SRC) $(RES_OBJ)
-	$(CC) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+$(TARGET): $(SRC) $(RES_OBJ) EventToken.h
+	$(CC) $(CXXFLAGS) -o $@ $(SRC) $(RES_OBJ) $(LDFLAGS)
 	@echo "Built $(TARGET) successfully"
 
 clean:
