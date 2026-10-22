@@ -298,15 +298,16 @@ namespace HTML2EXE_2
                 {
                     Directory.CreateDirectory(cacheDir);
 
-                    // Determine archive name from URL (e.g. webview.zip or webview-big.zip)
-                    string zipName = "webview.zip";
+                    // Version-scoped runtime archive to ensure new compiler versions get matching native runtimes
+                    string zipName = CurrentVersion > 0
+                        ? $"webview_v{CurrentVersion}.zip"
+                        : "webview_native.zip";
+
+                    // Invalidate legacy unversioned C# .NET caches
                     try
                     {
-                        if (Uri.TryCreate(webviewURL, UriKind.Absolute, out Uri? uri))
-                        {
-                            string seg = Path.GetFileName(uri.AbsolutePath);
-                            if (!string.IsNullOrEmpty(seg)) zipName = seg;
-                        }
+                        string oldLegacy = Path.Combine(cacheDir, "webview-big.zip");
+                        if (File.Exists(oldLegacy)) File.Delete(oldLegacy);
                     }
                     catch { }
 

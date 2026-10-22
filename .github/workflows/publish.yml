@@ -141,14 +141,15 @@ jobs:
     - name: Rename to HTML2EXE-big.exe
       run: mv ./publish-big/HTML2EXE.exe ./publish-big/HTML2EXE-big.exe
 
-    # -- Build: HTML2EXE standard (framework-dependent, requires .NET 8) -------
-    - name: Build HTML2EXE.exe [framework-dependent]
+    # -- Build: HTML2EXE standard (self-contained, zero .NET required) ---------
+    - name: Build HTML2EXE.exe [self-contained]
       run: |
         dotnet publish "${{ env.MAIN_PROJECT }}" \
           -c Release -r win-x64 \
           -p:PublishSingleFile=true \
+          -p:InvariantGlobalization=true \
           -p:EnableWindowsTargeting=true \
-          --no-self-contained \
+          --self-contained true \
           -o ./publish
 
     # -- Offline variant: disable auto-update, then rebuild big ----------------
@@ -213,13 +214,15 @@ jobs:
       run: |
         echo "## Build ${{ github.run_number }} succeeded" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
+        echo "All compiler and webview artifacts have **ZERO .NET dependencies** (self-contained / native C++)." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
         echo "| Artifact | Type |" >> $GITHUB_STEP_SUMMARY
         echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-        echo "| HTML2EXE.exe | Framework-dependent (requires .NET 8) |" >> $GITHUB_STEP_SUMMARY
-        echo "| HTML2EXE-big.exe | Self-contained (.NET bundled) |" >> $GITHUB_STEP_SUMMARY
+        echo "| HTML2EXE.exe | Self-contained (zero .NET required) |" >> $GITHUB_STEP_SUMMARY
+        echo "| HTML2EXE-big.exe | Self-contained (zero .NET required) |" >> $GITHUB_STEP_SUMMARY
         echo "| HTML2EXE-offline.exe | Self-contained, no auto-update |" >> $GITHUB_STEP_SUMMARY
-        echo "| webview.zip | Native C++ WebView2 host (~200 KB, zero .NET) |" >> $GITHUB_STEP_SUMMARY
-        echo "| webview-big.zip | Same native C++ binary (alias) |" >> $GITHUB_STEP_SUMMARY
+        echo "| webview.zip | Native C++ WebView2 host (~300 KB, pure Win32) |" >> $GITHUB_STEP_SUMMARY
+        echo "| webview-big.zip | Same native C++ binary |" >> $GITHUB_STEP_SUMMARY
 
 # =============================================================================
 #  JOB 2 - RELEASE
@@ -285,16 +288,16 @@ jobs:
         RUN="${{ github.run_number }}"
         {
           printf "## HTML2EXE 2.%s\n\n" "$RUN"
-          printf "### 🚀 WebView host: **Native C++ — zero .NET dependency**\n\n"
+          printf "### 🚀 Zero .NET Dependencies across all executables\n\n"
           printf "| Download | Description |\n"
           printf "|---|---|\n"
-          printf "| [**HTML2EXE-big.zip**](https://github.com/%s/releases/download/%s/HTML2EXE-big.zip) ⭐ | **Recommended** (Self-contained, avoids browser warnings) |\n" "$REPO" "$RUN"
-          printf "| [**HTML2EXE-big.exe**](https://github.com/%s/releases/download/%s/HTML2EXE-big.exe) | Self-contained executable — no .NET required |\n" "$REPO" "$RUN"
-          printf "| [**HTML2EXE.zip**](https://github.com/%s/releases/download/%s/HTML2EXE.zip) | Framework-dependent zip (requires .NET 8) |\n" "$REPO" "$RUN"
-          printf "| [**HTML2EXE.exe**](https://github.com/%s/releases/download/%s/HTML2EXE.exe) | Framework-dependent executable |\n" "$REPO" "$RUN"
-          printf "| [**HTML2EXE-offline.zip**](https://github.com/%s/releases/download/%s/HTML2EXE-offline.zip) | Offline zip (no auto-update) |\n" "$REPO" "$RUN"
-          printf "| webview.zip | Native C++ WebView2 host (~200 KB, **zero .NET**) |\n"
-          printf "| webview-big.zip | Same native C++ binary (alias) |\n"
+          printf "| [**HTML2EXE.zip**](https://github.com/%s/releases/download/%s/HTML2EXE.zip) ⭐ | **Recommended** (Self-contained zip — zero .NET required) |\n" "$REPO" "$RUN"
+          printf "| [**HTML2EXE.exe**](https://github.com/%s/releases/download/%s/HTML2EXE.exe) | Self-contained executable — zero .NET required |\n" "$REPO" "$RUN"
+          printf "| [**HTML2EXE-big.zip**](https://github.com/%s/releases/download/%s/HTML2EXE-big.zip) | Self-contained zip |\n" "$REPO" "$RUN"
+          printf "| [**HTML2EXE-big.exe**](https://github.com/%s/releases/download/%s/HTML2EXE-big.exe) | Self-contained executable |\n" "$REPO" "$RUN"
+          printf "| [**HTML2EXE-offline.zip**](https://github.com/%s/releases/download/%s/HTML2EXE-offline.zip) | Offline zip (no auto-update check) |\n" "$REPO" "$RUN"
+          printf "| webview.zip | Native C++ WebView2 host (~300 KB, **pure Win32**) |\n"
+          printf "| webview-big.zip | Same native C++ binary |\n"
           printf "| latest.json | Auto-update manifest |\n\n"
           printf "### Changes\n"
           printf "> %s\n" "${{ github.event.head_commit.message }}"
