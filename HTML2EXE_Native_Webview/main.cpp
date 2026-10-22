@@ -35,17 +35,32 @@ public:
     ComPtr(const ComPtr& o) : m_ptr(o.m_ptr) { if (m_ptr) m_ptr->AddRef(); }
     ComPtr(ComPtr&& o) noexcept : m_ptr(o.m_ptr) { o.m_ptr = nullptr; }
     ComPtr& operator=(const ComPtr& o) {
-        if (this != &o) { Reset(); m_ptr = o.m_ptr; if (m_ptr) m_ptr->AddRef(); }
+        if (this != &o) {
+            Reset();
+            m_ptr = o.m_ptr;
+            if (m_ptr) m_ptr->AddRef();
+        }
         return *this;
     }
     ComPtr& operator=(ComPtr&& o) noexcept {
-        if (this != &o) { Reset(); m_ptr = o.m_ptr; o.m_ptr = nullptr; }
+        if (this != &o) {
+            Reset();
+            m_ptr = o.m_ptr;
+            o.m_ptr = nullptr;
+        }
+        return *this;
+    }
+    ComPtr& operator=(T* p) {
+        if (m_ptr != p) {
+            Reset();
+            m_ptr = p;
+            if (m_ptr) m_ptr->AddRef();
+        }
         return *this;
     }
     void Reset() { if (m_ptr) { m_ptr->Release(); m_ptr = nullptr; } }
     T* Get() const { return m_ptr; }
     T** GetAddressOf() { Reset(); return &m_ptr; }
-    T** operator&() { Reset(); return &m_ptr; }
     T* operator->() const { return m_ptr; }
     explicit operator bool() const { return m_ptr != nullptr; }
 };
@@ -58,6 +73,8 @@ class EnvCompletedHandler : public ICoreWebView2CreateCoreWebView2EnvironmentCom
     ULONG m_ref = 1;
 public:
     EnvCompletedHandler(F&& fn) : m_fn(std::forward<F>(fn)) {}
+    virtual ~EnvCompletedHandler() = default;
+
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** ppv) override {
         if (!ppv) return E_POINTER;
         *ppv = static_cast<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler*>(this);
@@ -85,6 +102,8 @@ class CtrlCompletedHandler : public ICoreWebView2CreateCoreWebView2ControllerCom
     ULONG m_ref = 1;
 public:
     CtrlCompletedHandler(F&& fn) : m_fn(std::forward<F>(fn)) {}
+    virtual ~CtrlCompletedHandler() = default;
+
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** ppv) override {
         if (!ppv) return E_POINTER;
         *ppv = static_cast<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler*>(this);
@@ -112,6 +131,8 @@ class TitleChangedHandler : public ICoreWebView2DocumentTitleChangedEventHandler
     ULONG m_ref = 1;
 public:
     TitleChangedHandler(F&& fn) : m_fn(std::forward<F>(fn)) {}
+    virtual ~TitleChangedHandler() = default;
+
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** ppv) override {
         if (!ppv) return E_POINTER;
         *ppv = static_cast<ICoreWebView2DocumentTitleChangedEventHandler*>(this);
@@ -139,6 +160,8 @@ class FullScreenChangedHandler : public ICoreWebView2ContainsFullScreenElementCh
     ULONG m_ref = 1;
 public:
     FullScreenChangedHandler(F&& fn) : m_fn(std::forward<F>(fn)) {}
+    virtual ~FullScreenChangedHandler() = default;
+
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** ppv) override {
         if (!ppv) return E_POINTER;
         *ppv = static_cast<ICoreWebView2ContainsFullScreenElementChangedEventHandler*>(this);
@@ -166,6 +189,8 @@ class AccelKeyPressedHandler : public ICoreWebView2AcceleratorKeyPressedEventHan
     ULONG m_ref = 1;
 public:
     AccelKeyPressedHandler(F&& fn) : m_fn(std::forward<F>(fn)) {}
+    virtual ~AccelKeyPressedHandler() = default;
+
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** ppv) override {
         if (!ppv) return E_POINTER;
         *ppv = static_cast<ICoreWebView2AcceleratorKeyPressedEventHandler*>(this);
@@ -550,11 +575,11 @@ static void InitWebView()
                     }
 
                     G.ctrl = ctrl;
-                    ctrl->get_CoreWebView2(&G.wv);
+                    ctrl->get_CoreWebView2(G.wv.GetAddressOf());
 
                     // Configure browser settings
                     ComPtr<ICoreWebView2Settings> settings;
-                    G.wv->get_Settings(&settings);
+                    G.wv->get_Settings(settings.GetAddressOf());
                     if (settings) {
                         settings->put_AreDefaultContextMenusEnabled(JsonGetBool(G.cfg, "context_menu", false));
                         settings->put_AreDevToolsEnabled(JsonGetBool(G.cfg, "dev_tools", false));
