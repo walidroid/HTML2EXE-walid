@@ -775,3 +775,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     CoUninitialize();
     return (int)msg.wParam;
 }
+
+// WinMain forwarder for toolchains and CRT startups expecting WinMain
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR, int nCmdShow)
+{
+    return wWinMain(hInst, hPrev, GetCommandLineW(), nCmdShow);
+}
+

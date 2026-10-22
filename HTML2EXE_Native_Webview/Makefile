@@ -28,6 +28,7 @@ CXXFLAGS = \
   -Wall \
   -Wno-unknown-pragmas \
   -mwindows \
+  -municode \
   -DUNICODE \
   -D_UNICODE \
   -DWINVER=0x0601 \
@@ -37,6 +38,7 @@ CXXFLAGS = \
 
 LDFLAGS = \
   -mwindows \
+  -municode \
   -static-libgcc \
   -static-libstdc++ \
   -lole32 \
