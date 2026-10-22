@@ -1,20 +1,7 @@
 /**
  * HTML2EXE Native WebView Host
- * Zero .NET dependency. Pure Win32 + WebView2 COM API.
- *
- * Features replicated from C# WebviewForm.cs:
- *   - config.json: title, width, height, url, maximized, resizable,
- *                  fullscreen, always_on_top, context_menu, dev_tools,
- *                  zoom_control, show_in_taskbar, control_box,
- *                  minimizable, maximizable, block_close, icon,
- *                  additional_cmd
- *   - Auto-finds index.html / any single HTML in webfiles/
- *   - F11 / Escape fullscreen toggle
- *   - Tracks page fullscreen events (ContainsFullScreenElementChanged)
- *   - Custom app icon from config
- *   - User data folder scoped to app title  (%APPDATA%\HTML2EXE\<title>)
- *   - Runs additional_cmd in webfiles/ directory
- *   - Extracts webfiles.zip on first run
+ * Zero .NET dependencies. Pure Win32 + WebView2 COM API.
+ * Portable across MSVC, Clang, and MinGW-w64.
  */
 
 #ifndef UNICODE
@@ -28,17 +15,76 @@
 #define NOMINMAX
 #include <windows.h>
 #include <shlobj.h>
-#include <wrl.h>
-#include <WebView2.h>
-#include <WebView2EnvironmentOptions.h>
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <fstream>
 #include <sstream>
-#include <iterator>
+#include <utility>
 
-// ── Tiny JSON reader ──────────────────────────────────────────────────────────
+// WebView2 header provided by NuGet package in CI or local build
+#include <WebView2.h>
+
+// ── Lightweight COM smart pointer (no WRL dependency) ─────────────────────────
+
+template <typename T>
+class ComPtr {
+    T* m_ptr = nullptr;
+public:
+    ComPtr() = default;
+    ComPtr(T* p) : m_ptr(p) { if (m_ptr) m_ptr->AddRef(); }
+    ~ComPtr() { Reset(); }
+    ComPtr(const ComPtr& o) : m_ptr(o.m_ptr) { if (m_ptr) m_ptr->AddRef(); }
+    ComPtr(ComPtr&& o) noexcept : m_ptr(o.m_ptr) { o.m_ptr = nullptr; }
+    ComPtr& operator=(const ComPtr& o) {
+        if (this != &o) { Reset(); m_ptr = o.m_ptr; if (m_ptr) m_ptr->AddRef(); }
+        return *this;
+    }
+    ComPtr& operator=(ComPtr&& o) noexcept {
+        if (this != &o) { Reset(); m_ptr = o.m_ptr; o.m_ptr = nullptr; }
+        return *this;
+    }
+    void Reset() { if (m_ptr) { m_ptr->Release(); m_ptr = nullptr; } }
+    T* Get() const { return m_ptr; }
+    T** GetAddressOf() { Reset(); return &m_ptr; }
+    T** operator&() { Reset(); return &m_ptr; }
+    T* operator->() const { return m_ptr; }
+    explicit operator bool() const { return m_ptr != nullptr; }
+};
+
+// ── Lightweight COM Callback implementation (no WRL dependency) ───────────────
+
+template <typename TInterface, typename F>
+class CallbackImpl : public TInterface {
+    F m_func;
+    ULONG m_ref = 1;
+public:
+    CallbackImpl(F&& func) : m_func(std::move(func)) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = static_cast<TInterface*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++m_ref; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG r = --m_ref;
+        if (r == 0) delete this;
+        return r;
+    }
+    template <typename... Args>
+    HRESULT STDMETHODCALLTYPE Invoke(Args... args) override {
+        return m_func(args...);
+    }
+};
+
+template <typename TInterface, typename F>
+TInterface* MakeCallback(F&& func) {
+    return new CallbackImpl<TInterface, typename std::decay<F>::type>(std::forward<F>(func));
+}
+
+// ── Tiny JSON parser ──────────────────────────────────────────────────────────
 
 static std::wstring JsonGetString(const std::string& json, const std::string& key)
 {
@@ -48,46 +94,46 @@ static std::wstring JsonGetString(const std::string& json, const std::string& ke
     pos = json.find(':', pos + searchKey.size());
     if (pos == std::string::npos) return L"";
     pos++;
-    while (pos < json.size() && (json[pos]==' '||json[pos]=='\t'||json[pos]=='\r'||json[pos]=='\n')) pos++;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\r' || json[pos] == '\n')) pos++;
     if (pos >= json.size()) return L"";
 
     std::string raw;
     if (json[pos] == '"') {
         pos++;
         while (pos < json.size() && json[pos] != '"') {
-            if (json[pos] == '\\' && pos+1 < json.size()) { pos++; raw += json[pos]; }
+            if (json[pos] == '\\' && pos + 1 < json.size()) { pos++; raw += json[pos]; }
             else raw += json[pos];
             pos++;
         }
     } else {
-        while (pos < json.size() && json[pos]!=',' && json[pos]!='}' && json[pos]!='\r' && json[pos]!='\n')
+        while (pos < json.size() && json[pos] != ',' && json[pos] != '}' && json[pos] != '\r' && json[pos] != '\n')
             raw += json[pos++];
-        while (!raw.empty() && (raw.back()==' '||raw.back()=='\t')) raw.pop_back();
+        while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t')) raw.pop_back();
     }
     if (raw.empty()) return L"";
     int len = MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), -1, nullptr, 0);
     if (len <= 0) return L"";
-    std::wstring ws(len-1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), -1, ws.data(), len);
+    std::wstring ws(len - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), -1, &ws[0], len);
     return ws;
 }
 
-static bool JsonGetBool(const std::string& json, const std::string& key, bool def=false)
+static bool JsonGetBool(const std::string& json, const std::string& key, bool defVal = false)
 {
-    auto v = JsonGetString(json, key);
+    std::wstring v = JsonGetString(json, key);
     if (v == L"true")  return true;
     if (v == L"false") return false;
-    return def;
+    return defVal;
 }
 
-static int JsonGetInt(const std::string& json, const std::string& key, int def=0)
+static int JsonGetInt(const std::string& json, const std::string& key, int defVal = 0)
 {
-    auto v = JsonGetString(json, key);
-    if (v.empty()) return def;
-    try { return std::stoi(v); } catch (...) { return def; }
+    std::wstring v = JsonGetString(json, key);
+    if (v.empty()) return defVal;
+    try { return std::stoi(v); } catch (...) { return defVal; }
 }
 
-// ── Utilities ─────────────────────────────────────────────────────────────────
+// ── File and Path Helpers ─────────────────────────────────────────────────────
 
 static bool FileExists_(const std::wstring& p)
 {
@@ -97,106 +143,154 @@ static bool FileExists_(const std::wstring& p)
 
 static std::wstring GetExeDir_()
 {
-    wchar_t buf[MAX_PATH]; GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    std::wstring s(buf); return s.substr(0, s.rfind(L'\\'));
+    wchar_t buf[MAX_PATH];
+    GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    std::wstring s(buf);
+    return s.substr(0, s.rfind(L'\\'));
 }
 
 static std::wstring AppDataDir_(const std::wstring& name)
 {
-    wchar_t buf[MAX_PATH]; SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, buf);
-    return std::wstring(buf) + L"\\HTML2EXE\\" + name;
+    wchar_t buf[MAX_PATH];
+    SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, buf);
+    std::wstring base = std::wstring(buf) + L"\\HTML2EXE";
+    CreateDirectoryW(base.c_str(), nullptr);
+    std::wstring target = base + L"\\" + name;
+    CreateDirectoryW(target.c_str(), nullptr);
+    return target;
 }
 
-static std::string ReadFile_(const std::wstring& p)
+static std::string ReadFileUtf8_(const std::wstring& p)
 {
-    std::ifstream f(p); if (!f) return "";
-    return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return "";
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 
 static std::wstring ToLower_(std::wstring s)
 {
-    std::transform(s.begin(), s.end(), s.begin(), ::towlower); return s;
+    std::transform(s.begin(), s.end(), s.begin(), ::towlower);
+    return s;
 }
+
 static bool HasExt_(const std::wstring& p, const std::wstring& ext)
 {
-    auto l = ToLower_(p); return l.size()>=ext.size() && l.substr(l.size()-ext.size())==ext;
+    std::wstring l = ToLower_(p);
+    return l.size() >= ext.size() && l.substr(l.size() - ext.size()) == ext;
 }
 
 static std::vector<std::wstring> ListFiles_(const std::wstring& dir)
 {
-    std::vector<std::wstring> r; WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((dir+L"\\*").c_str(), &fd);
-    if (h==INVALID_HANDLE_VALUE) return r;
-    do { if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) r.push_back(dir+L"\\"+fd.cFileName); }
-    while (FindNextFileW(h, &fd));
-    FindClose(h); return r;
+    std::vector<std::wstring> r;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return r;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            r.push_back(dir + L"\\" + fd.cFileName);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return r;
 }
 
 static std::wstring ExpandEnv_(const std::wstring& s)
 {
-    wchar_t buf[4096]; ExpandEnvironmentStringsW(s.c_str(), buf, 4096); return buf;
+    wchar_t buf[4096];
+    ExpandEnvironmentStringsW(s.c_str(), buf, 4096);
+    return buf;
 }
 
-static bool ExtractZip_(const std::wstring& zip, const std::wstring& dest)
+static bool RunHiddenCmd(const std::wstring& cmd, const std::wstring& workDir = L"")
 {
-    std::wstring cmd = L"powershell.exe -NoProfile -Command \"Expand-Archive -Force -LiteralPath '"
-                     + zip + L"' -DestinationPath '" + dest + L"'\"";
-    STARTUPINFOW si{}; si.cb=sizeof(si); si.dwFlags=STARTF_USESHOWWINDOW; si.wShowWindow=SW_HIDE;
-    PROCESS_INFORMATION pi{}; DWORD code=1;
-    if (CreateProcessW(nullptr,(LPWSTR)cmd.c_str(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&si,&pi)) {
-        WaitForSingleObject(pi.hProcess, INFINITE);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    std::wstring mutableCmd = cmd;
+    LPCWSTR cwd = workDir.empty() ? nullptr : workDir.c_str();
+
+    if (CreateProcessW(nullptr, &mutableCmd[0], nullptr, nullptr, FALSE,
+                       CREATE_NO_WINDOW, nullptr, cwd, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, 30000);
+        DWORD code = 1;
         GetExitCodeProcess(pi.hProcess, &code);
-        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return code == 0;
     }
-    return code==0;
+    return false;
 }
 
-// ── App State ─────────────────────────────────────────────────────────────────
+static void ExtractZip_(const std::wstring& zipPath, const std::wstring& destDir)
+{
+    // Try built-in tar.exe first (native on Windows 10 1803+ / Windows 11)
+    std::wstring tarCmd = L"tar.exe -xf \"" + zipPath + L"\" -C \"" + destDir + L"\"";
+    if (!RunHiddenCmd(tarCmd, destDir)) {
+        // Fallback: PowerShell Expand-Archive
+        std::wstring psCmd = L"powershell.exe -NoProfile -NonInteractive -Command \"Expand-Archive -Force -LiteralPath '"
+                           + zipPath + L"' -DestinationPath '" + destDir + L"'\"";
+        RunHiddenCmd(psCmd, destDir);
+    }
+}
 
-struct App {
-    HWND hwnd{};
-    Microsoft::WRL::ComPtr<ICoreWebView2Environment> env;
-    Microsoft::WRL::ComPtr<ICoreWebView2Controller>  ctrl;
-    Microsoft::WRL::ComPtr<ICoreWebView2>            wv;
+// ── Application State ─────────────────────────────────────────────────────────
+
+struct AppState {
+    HWND hwnd = nullptr;
+    ComPtr<ICoreWebView2Environment> env;
+    ComPtr<ICoreWebView2Controller>  ctrl;
+    ComPtr<ICoreWebView2>            wv;
 
     std::string  cfg;
     std::wstring exeDir;
     std::wstring webfilesPath;
 
-    bool blockClose{false}, resizable{true}, cfgFullscreen{false};
-    bool isFullscreen{false};
-    LONG savedStyle{}, savedExStyle{};
+    bool blockClose = false;
+    bool resizable = true;
+    bool cfgFullscreen = false;
+    bool isFullscreen = false;
+
+    LONG savedStyle = 0;
+    LONG savedExStyle = 0;
     WINDOWPLACEMENT savedWP{};
 } G;
 
-// ── Fullscreen ────────────────────────────────────────────────────────────────
+// ── Fullscreen Support ────────────────────────────────────────────────────────
 
 static void EnterFS()
 {
-    if (G.isFullscreen) return;
+    if (G.isFullscreen || !G.hwnd) return;
     G.isFullscreen = true;
-    G.savedStyle   = GetWindowLongW(G.hwnd, GWL_STYLE);
+    G.savedStyle = GetWindowLongW(G.hwnd, GWL_STYLE);
     G.savedExStyle = GetWindowLongW(G.hwnd, GWL_EXSTYLE);
     G.savedWP.length = sizeof(G.savedWP);
     GetWindowPlacement(G.hwnd, &G.savedWP);
-    MONITORINFO mi{sizeof(mi)};
+
+    MONITORINFO mi{ sizeof(mi) };
     GetMonitorInfoW(MonitorFromWindow(G.hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
-    SetWindowLongW(G.hwnd, GWL_STYLE,   G.savedStyle   & ~(WS_CAPTION|WS_THICKFRAME|WS_MINIMIZE|WS_MAXIMIZE|WS_SYSMENU));
-    SetWindowLongW(G.hwnd, GWL_EXSTYLE, G.savedExStyle & ~(WS_EX_DLGMODALFRAME|WS_EX_WINDOWEDGE|WS_EX_CLIENTEDGE|WS_EX_STATICEDGE));
+
+    SetWindowLongW(G.hwnd, GWL_STYLE,
+                   G.savedStyle & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZE | WS_MAXIMIZE | WS_SYSMENU));
+    SetWindowLongW(G.hwnd, GWL_EXSTYLE,
+                   G.savedExStyle & ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE));
+
     SetWindowPos(G.hwnd, HWND_TOP,
                  mi.rcMonitor.left, mi.rcMonitor.top,
-                 mi.rcMonitor.right-mi.rcMonitor.left,
-                 mi.rcMonitor.bottom-mi.rcMonitor.top,
-                 SWP_NOOWNERZORDER|SWP_FRAMECHANGED|SWP_SHOWWINDOW);
+                 mi.rcMonitor.right - mi.rcMonitor.left,
+                 mi.rcMonitor.bottom - mi.rcMonitor.top,
+                 SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 }
+
 static void ExitFS()
 {
-    if (!G.isFullscreen) return;
+    if (!G.isFullscreen || !G.hwnd) return;
     G.isFullscreen = false;
-    SetWindowLongW(G.hwnd, GWL_STYLE,   G.savedStyle);
+    SetWindowLongW(G.hwnd, GWL_STYLE, G.savedStyle);
     SetWindowLongW(G.hwnd, GWL_EXSTYLE, G.savedExStyle);
     SetWindowPlacement(G.hwnd, &G.savedWP);
-    SetWindowPos(G.hwnd, nullptr, 0,0,0,0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOOWNERZORDER|SWP_FRAMECHANGED);
+    SetWindowPos(G.hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
 }
 
 // ── WndProc ───────────────────────────────────────────────────────────────────
@@ -205,145 +299,256 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_SIZE:
-        if (G.ctrl) { RECT rc; GetClientRect(hwnd,&rc); G.ctrl->put_Bounds(rc); }
+        if (G.ctrl) {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            G.ctrl->put_Bounds(rc);
+        }
         break;
+
     case WM_KEYDOWN:
-        if (wp==VK_F11 && G.resizable) { G.isFullscreen ? ExitFS() : EnterFS(); }
-        else if (wp==VK_ESCAPE && G.isFullscreen) ExitFS();
+        if (wp == VK_F11 && G.resizable) {
+            G.isFullscreen ? ExitFS() : EnterFS();
+            return 0;
+        } else if (wp == VK_ESCAPE && G.isFullscreen) {
+            ExitFS();
+            return 0;
+        }
         break;
+
     case WM_CLOSE:
         if (G.blockClose) return 0;
-        DestroyWindow(hwnd); break;
+        DestroyWindow(hwnd);
+        break;
+
     case WM_DESTROY:
-        PostQuitMessage(0); break;
+        PostQuitMessage(0);
+        break;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-// ── WebView2 init ─────────────────────────────────────────────────────────────
+// ── Dynamic WebView2 Loader ───────────────────────────────────────────────────
+
+typedef HRESULT (STDAPICALLTYPE *CreateCoreWebView2EnvironmentWithOptionsFn)(
+    PCWSTR browserExecutableFolder,
+    PCWSTR userDataFolder,
+    ICoreWebView2EnvironmentOptions* environmentOptions,
+    ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler* environmentCreatedHandler);
 
 static void InitWebView()
 {
     auto& cfg = G.cfg;
 
-    // Determine URL
+    // 1. Determine target URL
     std::wstring url;
     std::wstring cfgUrl = JsonGetString(cfg, "url");
     if (!cfgUrl.empty()) {
         url = ExpandEnv_(cfgUrl);
     } else {
-        auto& wp = G.webfilesPath;
-        auto files = ListFiles_(wp);
-        std::sort(files.begin(), files.end(), [](auto&a,auto&b){ return ToLower_(a)<ToLower_(b); });
+        auto files = ListFiles_(G.webfilesPath);
+        std::sort(files.begin(), files.end(), [](const std::wstring& a, const std::wstring& b) {
+            return ToLower_(a) < ToLower_(b);
+        });
+
         std::vector<std::wstring> htmls;
-        for (auto& f : files) if (HasExt_(f,L".html")||HasExt_(f,L".htm")) htmls.push_back(f);
-
-        if (files.size()==1)                          url = files[0];
-        else if (FileExists_(wp+L"\\index.html"))     url = wp+L"\\index.html";
-        else if (FileExists_(wp+L"\\index.htm"))      url = wp+L"\\index.htm";
-        else if (htmls.size()==1)                     url = htmls[0];
-        else if (files.size()==2) {
-            for (auto& f:files) if (!HasExt_(f,L".ico")) { url=f; break; }
+        for (const auto& f : files) {
+            if (HasExt_(f, L".html") || HasExt_(f, L".htm"))
+                htmls.push_back(f);
         }
-        else if (!htmls.empty())                      url = htmls[0];
 
-        if (!url.empty() && url.substr(0,8)!=L"https://" && url.substr(0,7)!=L"http://")
+        // Priority 1: single file
+        if (files.size() == 1) {
+            url = files[0];
+        }
+        // Priority 2: index.html
+        else if (FileExists_(G.webfilesPath + L"\\index.html")) {
+            url = G.webfilesPath + L"\\index.html";
+        }
+        // Priority 3: index.htm
+        else if (FileExists_(G.webfilesPath + L"\\index.htm")) {
+            url = G.webfilesPath + L"\\index.htm";
+        }
+        // Priority 4: single HTML file
+        else if (htmls.size() == 1) {
+            url = htmls[0];
+        }
+        // Priority 5: 2 files where one is .ico -> choose the non-ico file
+        else if (files.size() == 2) {
+            for (const auto& f : files) {
+                if (!HasExt_(f, L".ico")) { url = f; break; }
+            }
+        }
+        // Priority 6: any HTML file
+        else if (!htmls.empty()) {
+            url = htmls[0];
+        }
+
+        if (!url.empty() && url.substr(0, 8) != L"https://" && url.substr(0, 7) != L"http://") {
             url = L"file:///" + url;
+        }
     }
 
+    // 2. User Data Folder scoped to AppData\HTML2EXE\<title>
     std::wstring title = JsonGetString(cfg, "title");
     if (title.empty()) title = L"default";
     std::wstring udf = AppDataDir_(title);
-    CreateDirectoryW(udf.c_str(), nullptr);
 
-    auto opts = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
-    CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), opts.Get(),
-        Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-            [url](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
-                if (FAILED(hr)) {
-                    MessageBoxW(nullptr,
-                        L"WebView2 Runtime not found.\nDownload it from https://developer.microsoft.com/en-us/microsoft-edge/webview2/",
-                        L"HTML2EXE", MB_ICONERROR);
-                    PostQuitMessage(1); return hr;
-                }
-                G.env = env;
-                env->CreateCoreWebView2Controller(G.hwnd,
-                    Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-                        [url](HRESULT hr, ICoreWebView2Controller* ctrl) -> HRESULT {
-                            if (FAILED(hr)) { PostQuitMessage(1); return hr; }
-                            G.ctrl = ctrl;
-                            ctrl->get_CoreWebView2(&G.wv);
+    // 3. Load WebView2Loader.dll
+    std::wstring loaderPath = G.exeDir + L"\\WebView2Loader.dll";
+    HMODULE hLoader = LoadLibraryW(loaderPath.c_str());
+    if (!hLoader) hLoader = LoadLibraryW(L"WebView2Loader.dll");
 
-                            // Settings
-                            Microsoft::WRL::ComPtr<ICoreWebView2Settings> s;
-                            G.wv->get_Settings(&s);
-                            if (s) {
-                                s->put_AreDefaultContextMenusEnabled(JsonGetBool(G.cfg,"context_menu",false));
-                                s->put_AreDevToolsEnabled(JsonGetBool(G.cfg,"dev_tools",false));
-                                s->put_IsZoomControlEnabled(JsonGetBool(G.cfg,"zoom_control",false));
-                                s->put_IsStatusBarEnabled(FALSE);
-                            }
+    if (!hLoader) {
+        MessageBoxW(G.hwnd,
+            L"WebView2Loader.dll could not be loaded.\nEnsure WebView2Loader.dll is present in the application folder.",
+            L"HTML2EXE Error", MB_ICONERROR);
+        PostQuitMessage(1);
+        return;
+    }
 
-                            // Title sync
-                            if (JsonGetString(G.cfg,"title").empty()) {
-                                G.wv->add_DocumentTitleChanged(
-                                    Microsoft::WRL::Callback<ICoreWebView2DocumentTitleChangedEventHandler>(
-                                        [](ICoreWebView2* wv, IUnknown*) -> HRESULT {
-                                            LPWSTR t=nullptr; wv->get_DocumentTitle(&t);
-                                            if (t) { SetWindowTextW(G.hwnd,t); CoTaskMemFree(t); }
-                                            return S_OK;
-                                        }).Get(), nullptr);
-                            }
+    auto pCreateEnv = (CreateCoreWebView2EnvironmentWithOptionsFn)GetProcAddress(
+        hLoader, "CreateCoreWebView2EnvironmentWithOptions");
 
-                            // Fullscreen sync
-                            G.wv->add_ContainsFullScreenElementChanged(
-                                Microsoft::WRL::Callback<ICoreWebView2ContainsFullScreenElementChangedEventHandler>(
-                                    [](ICoreWebView2* wv, IUnknown*) -> HRESULT {
-                                        if (G.cfgFullscreen) return S_OK;
-                                        BOOL full=FALSE; wv->get_ContainsFullScreenElement(&full);
-                                        if (full) EnterFS(); else ExitFS();
-                                        return S_OK;
-                                    }).Get(), nullptr);
+    if (!pCreateEnv) {
+        MessageBoxW(G.hwnd,
+            L"Failed to locate CreateCoreWebView2EnvironmentWithOptions in WebView2Loader.dll.",
+            L"HTML2EXE Error", MB_ICONERROR);
+        PostQuitMessage(1);
+        return;
+    }
 
-                            RECT rc; GetClientRect(G.hwnd,&rc);
-                            ctrl->put_Bounds(rc);
-                            ctrl->put_IsVisible(TRUE);
-                            if (!url.empty()) G.wv->Navigate(url.c_str());
+    auto envHandler = MakeCallback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+        [url](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
+            if (FAILED(hr) || !env) {
+                MessageBoxW(G.hwnd,
+                    L"Microsoft Edge WebView2 Runtime is required.\nPlease download and install it from:\nhttps://developer.microsoft.com/en-us/microsoft-edge/webview2/",
+                    L"HTML2EXE - Runtime Required", MB_ICONEXCLAMATION);
+                PostQuitMessage(1);
+                return hr;
+            }
+
+            G.env = env;
+
+            auto ctrlHandler = MakeCallback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+                [url](HRESULT hr, ICoreWebView2Controller* ctrl) -> HRESULT {
+                    if (FAILED(hr) || !ctrl) {
+                        PostQuitMessage(1);
+                        return hr;
+                    }
+
+                    G.ctrl = ctrl;
+                    ctrl->get_CoreWebView2(&G.wv);
+
+                    // Configure browser settings
+                    ComPtr<ICoreWebView2Settings> settings;
+                    G.wv->get_Settings(&settings);
+                    if (settings) {
+                        settings->put_AreDefaultContextMenusEnabled(JsonGetBool(G.cfg, "context_menu", false));
+                        settings->put_AreDevToolsEnabled(JsonGetBool(G.cfg, "dev_tools", false));
+                        settings->put_IsZoomControlEnabled(JsonGetBool(G.cfg, "zoom_control", false));
+                        settings->put_IsStatusBarEnabled(FALSE);
+                    }
+
+                    // Dynamic title sync if title not hardcoded in config
+                    if (JsonGetString(G.cfg, "title").empty()) {
+                        auto titleHandler = MakeCallback<ICoreWebView2DocumentTitleChangedEventHandler>(
+                            [](ICoreWebView2* wv, IUnknown*) -> HRESULT {
+                                LPWSTR docTitle = nullptr;
+                                wv->get_DocumentTitle(&docTitle);
+                                if (docTitle) {
+                                    SetWindowTextW(G.hwnd, docTitle);
+                                    CoTaskMemFree(docTitle);
+                                }
+                                return S_OK;
+                            });
+                        G.wv->add_DocumentTitleChanged(titleHandler, nullptr);
+                    }
+
+                    // Track HTML5 video/element fullscreen events
+                    auto fsHandler = MakeCallback<ICoreWebView2ContainsFullScreenElementChangedEventHandler>(
+                        [](ICoreWebView2* wv, IUnknown*) -> HRESULT {
+                            if (G.cfgFullscreen) return S_OK;
+                            BOOL full = FALSE;
+                            wv->get_ContainsFullScreenElement(&full);
+                            if (full) EnterFS(); else ExitFS();
                             return S_OK;
-                        }).Get());
-                return S_OK;
-            }).Get());
+                        });
+                    G.wv->add_ContainsFullScreenElementChanged(fsHandler, nullptr);
+
+                    // Keyboard shortcuts while webview has focus (F11 fullscreen, Escape exit)
+                    auto accelHandler = MakeCallback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
+                        [](ICoreWebView2Controller*, ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
+                            COREWEBVIEW2_KEY_EVENT_KIND kind;
+                            args->get_KeyEventKind(&kind);
+                            if (kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN) {
+                                UINT key = 0;
+                                args->get_VirtualKey(&key);
+                                if (key == VK_F11 && G.resizable) {
+                                    G.isFullscreen ? ExitFS() : EnterFS();
+                                    args->put_Handled(TRUE);
+                                } else if (key == VK_ESCAPE && G.isFullscreen) {
+                                    ExitFS();
+                                    args->put_Handled(TRUE);
+                                }
+                            }
+                            return S_OK;
+                        });
+                    G.ctrl->add_AcceleratorKeyPressed(accelHandler, nullptr);
+
+                    // Resize and show WebView2
+                    RECT rc;
+                    GetClientRect(G.hwnd, &rc);
+                    ctrl->put_Bounds(rc);
+                    ctrl->put_IsVisible(TRUE);
+
+                    // Navigate
+                    if (!url.empty()) {
+                        G.wv->Navigate(url.c_str());
+                    }
+
+                    return S_OK;
+                });
+
+            env->CreateCoreWebView2Controller(G.hwnd, ctrlHandler);
+            return S_OK;
+        });
+
+    pCreateEnv(nullptr, udf.c_str(), nullptr, envHandler);
 }
 
-// ── Entry Point ───────────────────────────────────────────────────────────────
+// ── Application Entry Point ───────────────────────────────────────────────────
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
 {
     SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-    G.exeDir       = GetExeDir_();
+    G.exeDir = GetExeDir_();
     G.webfilesPath = G.exeDir + L"\\webfiles";
 
-    // Extract webfiles.zip if present
-    std::wstring zip = G.exeDir + L"\\webfiles.zip";
-    if (FileExists_(zip)) { ExtractZip_(zip, G.exeDir); DeleteFileW(zip.c_str()); }
+    // 1. Extract webfiles.zip if present
+    std::wstring zipPath = G.exeDir + L"\\webfiles.zip";
+    if (FileExists_(zipPath)) {
+        ExtractZip_(zipPath, G.exeDir);
+        DeleteFileW(zipPath.c_str());
+    }
 
-    // Read config
-    G.cfg = ReadFile_(G.exeDir + L"\\config.json");
+    // 2. Read config.json
+    G.cfg = ReadFileUtf8_(G.exeDir + L"\\config.json");
     auto& cfg = G.cfg;
 
     std::wstring title       = JsonGetString(cfg, "title");
-    int          w           = JsonGetInt(cfg, "width",  1024);
-    int          h           = JsonGetInt(cfg, "height",  768);
-    bool         maximized   = JsonGetBool(cfg, "maximized",  false);
-    bool         resizable   = JsonGetBool(cfg, "resizable",  true);
-    bool         fullscreen  = JsonGetBool(cfg, "fullscreen",  false);
-    bool         alwaysTop   = JsonGetBool(cfg, "always_on_top",  false);
-    bool         showInBar   = JsonGetBool(cfg, "show_in_taskbar",  true);
-    bool         ctrlBox     = JsonGetBool(cfg, "control_box",  true);
-    bool         minimizable = JsonGetBool(cfg, "minimizable",  true);
-    bool         maximizable = JsonGetBool(cfg, "maximizable",  true);
+    int          w           = JsonGetInt(cfg, "width", 1024);
+    int          h           = JsonGetInt(cfg, "height", 768);
+    bool         maximized   = JsonGetBool(cfg, "maximized", false);
+    bool         resizable   = JsonGetBool(cfg, "resizable", true);
+    bool         fullscreen  = JsonGetBool(cfg, "fullscreen", false);
+    bool         alwaysTop   = JsonGetBool(cfg, "always_on_top", false);
+    bool         showInBar   = JsonGetBool(cfg, "show_in_taskbar", true);
+    bool         ctrlBox     = JsonGetBool(cfg, "control_box", true);
+    bool         minimizable = JsonGetBool(cfg, "minimizable", true);
+    bool         maximizable = JsonGetBool(cfg, "maximizable", true);
     std::wstring iconPath    = JsonGetString(cfg, "icon");
     std::wstring additCmd    = JsonGetString(cfg, "additional_cmd");
 
@@ -351,61 +556,85 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     G.resizable     = resizable;
     G.cfgFullscreen = fullscreen;
 
-    // Register window class
-    WNDCLASSEXW wc{}; wc.cbSize=sizeof(wc); wc.lpfnWndProc=WndProc;
-    wc.hInstance=hInst; wc.lpszClassName=L"H2E_NWV";
-    wc.hbrBackground=(HBRUSH)(COLOR_WINDOW+1);
-    wc.hCursor=LoadCursor(nullptr, IDC_ARROW);
+    // 3. Register window class
+    WNDCLASSEXW wc{};
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = hInst;
+    wc.lpszClassName = L"HTML2EXE_NativeHost";
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
 
-    // Load icon
     HICON hIcon = nullptr;
     if (!iconPath.empty()) {
-        std::wstring icoFull = (iconPath.find(L'\\')==std::wstring::npos && iconPath.find(L'/')==std::wstring::npos)
+        std::wstring icoFull = (iconPath.find(L'\\') == std::wstring::npos && iconPath.find(L'/') == std::wstring::npos)
             ? G.exeDir + L"\\" + iconPath : iconPath;
-        hIcon = (HICON)LoadImageW(nullptr, icoFull.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE|LR_DEFAULTSIZE);
+        hIcon = (HICON)LoadImageW(nullptr, icoFull.c_str(), IMAGE_ICON, 0, 0,
+                                  LR_LOADFROMFILE | LR_DEFAULTSIZE);
     }
-    wc.hIcon = hIcon; wc.hIconSm = hIcon;
+    wc.hIcon   = hIcon;
+    wc.hIconSm = hIcon;
     RegisterClassExW(&wc);
 
-    // Build styles
+    // 4. Calculate styles and window positioning
     DWORD style = WS_OVERLAPPEDWINDOW;
     if (!resizable)   style &= ~WS_THICKFRAME;
     if (!maximizable) style &= ~WS_MAXIMIZEBOX;
     if (!minimizable) style &= ~WS_MINIMIZEBOX;
-    if (!ctrlBox)     style &= ~(WS_SYSMENU|WS_CAPTION);
+    if (!ctrlBox)     style &= ~(WS_SYSMENU | WS_CAPTION);
 
     DWORD exStyle = WS_EX_APPWINDOW;
     if (!showInBar) exStyle &= ~WS_EX_APPWINDOW;
     if (alwaysTop)  exStyle |= WS_EX_TOPMOST;
 
-    int sx=(GetSystemMetrics(SM_CXSCREEN)-w)/2;
-    int sy=(GetSystemMetrics(SM_CYSCREEN)-h)/2;
+    int sx = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
+    int sy = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
-    G.hwnd = CreateWindowExW(exStyle, L"H2E_NWV",
-        title.empty() ? L"HTML2EXE App" : title.c_str(),
+    G.hwnd = CreateWindowExW(
+        exStyle, L"HTML2EXE_NativeHost",
+        title.empty() ? L"HTML2EXE" : title.c_str(),
         style, sx, sy, w, h, nullptr, nullptr, hInst, nullptr);
-    if (!G.hwnd) { CoUninitialize(); return 1; }
 
-    if (fullscreen) { ShowWindow(G.hwnd, SW_SHOWNORMAL); EnterFS(); }
-    else if (maximized) ShowWindow(G.hwnd, SW_MAXIMIZE);
-    else ShowWindow(G.hwnd, SW_SHOWNORMAL);
+    if (!G.hwnd) {
+        CoUninitialize();
+        return 1;
+    }
+
+    if (fullscreen) {
+        ShowWindow(G.hwnd, SW_SHOWNORMAL);
+        EnterFS();
+    } else if (maximized) {
+        ShowWindow(G.hwnd, SW_MAXIMIZE);
+    } else {
+        ShowWindow(G.hwnd, SW_SHOWNORMAL);
+    }
     UpdateWindow(G.hwnd);
 
-    // additional_cmd
+    // 5. Execute additional_cmd if specified
     if (!additCmd.empty()) {
-        STARTUPINFOW si{}; si.cb=sizeof(si); si.dwFlags=STARTF_USESHOWWINDOW; si.wShowWindow=SW_HIDE;
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
         PROCESS_INFORMATION pi{};
         std::wstring cmd = L"cmd.exe /c " + additCmd;
-        if (CreateProcessW(nullptr,(LPWSTR)cmd.c_str(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,
-                           G.webfilesPath.c_str(),&si,&pi)) {
-            CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+        if (CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE,
+                           CREATE_NO_WINDOW, nullptr, G.webfilesPath.c_str(), &si, &pi)) {
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
         }
     }
 
+    // 6. Initialize WebView2
     InitWebView();
 
+    // 7. Windows Message Loop
     MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
+    while (GetMessage(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
     CoUninitialize();
     return (int)msg.wParam;
 }
