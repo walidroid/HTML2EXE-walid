@@ -106,7 +106,8 @@ jobs:
       run: |
         cd "${{ env.CPP_WV_DIR }}"
         make \
-          CC=x86_64-w64-mingw32-g++ \
+          CC=x86_64-w64-mingw32-gcc \
+          CXX=x86_64-w64-mingw32-g++ \
           RC=x86_64-w64-mingw32-windres \
           WV2_SDK="${{ github.workspace }}/webview2-sdk"
         ls -lh Webview.exe

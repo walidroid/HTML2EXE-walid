@@ -14,6 +14,9 @@ namespace HTML2EXE_2
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool FreeConsole();
 
+        [DllImport("imagehlp.dll", SetLastError = true)]
+        private static extern uint MapFileAndCheckSumW([MarshalAs(UnmanagedType.LPWStr)] string filename, out uint headerSum, out uint checkSum);
+
 #if BIG_BUILD
             public static readonly bool IsBigBuild = true;
 #else
@@ -283,6 +286,7 @@ namespace HTML2EXE_2
 
         public static void build(string output)
         { // Builds the final executable
+            CheckSensitiveKeywords(Path.GetFileNameWithoutExtension(output));
             bool hasConfig = File.Exists(tmpConfigJson);
             JsonNode config = hasConfig ? JsonNode.Parse(File.ReadAllText(tmpConfigJson)) ?? new JsonObject() : new JsonObject(); // Parse the config file if it exists, otherwise create a new JsonObject
             if (!File.Exists(Path.Combine(tmpPath, "Webview.exe"))) // If there is no Webview.exe in the tmpPath
@@ -468,11 +472,104 @@ SourceFiles0=.\
 #else
             log("Debug build detected, skipping RCEdit...");
 #endif
+            FixPECheckSum(tmpOutputPath);
+            TrySignExecutable(tmpOutputPath, config);
             log("Cleaning up...");
             File.Move(tmpOutputPath, output, true);
 
             log("Finished building!", false, true, GUI);
             log($"Output: {output}", false, true);
+        }
+
+        private static readonly string[] SensitiveKeywords = new[]
+        {
+            "google", "microsoft", "windows update", "apple", "paypal", "netflix",
+            "bank", "login", "signin", "password", "steam", "invoice"
+        };
+
+        public static void CheckSensitiveKeywords(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return;
+            foreach (var kw in SensitiveKeywords)
+            {
+                if (name.Contains(kw, StringComparison.OrdinalIgnoreCase))
+                {
+                    log($"[SECURITY ADVISORY] Name '{name}' contains the keyword '{kw}'. Automated cloud scans (Google Drive, Microsoft Defender, SmartScreen) aggressively flag brand keywords in unsigned executables as phishing or malware. To prevent false positives, consider using a generic name.", true, false, GUI);
+                    break;
+                }
+            }
+        }
+
+        public static void FixPECheckSum(string filePath)
+        {
+            try
+            {
+                uint headerSum, checkSum;
+                if (MapFileAndCheckSumW(filePath, out headerSum, out checkSum) == 0) // 0 is CHECKSUM_SUCCESS
+                {
+                    using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
+                    using (var reader = new BinaryReader(stream))
+                    using (var writer = new BinaryWriter(stream))
+                    {
+                        if (stream.Length < 0x40) return;
+                        stream.Seek(0x3C, SeekOrigin.Begin); // Offset to PE signature pointer (e_lfanew)
+                        int peOffset = reader.ReadInt32();
+                        if (peOffset <= 0 || peOffset + 0x58 > stream.Length) return;
+
+                        // Verify PE signature "PE\0\0" (0x00004550)
+                        stream.Seek(peOffset, SeekOrigin.Begin);
+                        if (reader.ReadUInt32() != 0x00004550) return;
+
+                        // CheckSum field is at peOffset + 0x58 in both PE32 and PE32+ OptionalHeader
+                        stream.Seek(peOffset + 0x58, SeekOrigin.Begin);
+                        writer.Write(checkSum);
+                    }
+                    log("Recalculated PE checksum successfully.");
+                }
+            }
+            catch (Exception ex)
+            {
+                log($"Warning: could not recalculate PE checksum: {ex.Message}", true, false);
+            }
+        }
+
+        public static void TrySignExecutable(string filePath, JsonNode config)
+        {
+            string? certPath = config["cert_path"]?.ToString() ?? Environment.GetEnvironmentVariable("HTML2EXE_CERT_PATH");
+            string? certPass = config["cert_pass"]?.ToString() ?? Environment.GetEnvironmentVariable("HTML2EXE_CERT_PASS");
+
+            if (!string.IsNullOrEmpty(certPath) && File.Exists(certPath))
+            {
+                log("Signing executable with Authenticode certificate...");
+                try
+                {
+                    string passArg = string.IsNullOrEmpty(certPass) ? "" : $"/p \"{certPass}\" ";
+                    using var p = new Process();
+                    p.StartInfo = new ProcessStartInfo
+                    {
+                        FileName = "signtool",
+                        Arguments = $"sign /f \"{certPath}\" {passArg}/tr http://timestamp.digicert.com /td sha256 /fd sha256 \"{filePath}\"",
+                        CreateNoWindow = true,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
+                    p.Start();
+                    p.WaitForExit();
+                    if (p.ExitCode == 0)
+                    {
+                        log("Executable signed successfully!");
+                    }
+                    else
+                    {
+                        log($"signtool returned non-zero exit code: {p.ExitCode}", true);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    log($"Warning: signing failed: {ex.Message}", true);
+                }
+            }
         }
 
         public static string? TryGetFilePath(string path)

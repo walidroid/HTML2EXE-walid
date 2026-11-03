@@ -23,6 +23,9 @@
 // WebView2 header provided by NuGet package in CI or local build
 #include <WebView2.h>
 
+// In-process ZIP decompression (zero external process / powershell invocation)
+#include "miniz.h"
+
 // ── Lightweight COM smart pointer (no WRL dependency) ─────────────────────────
 
 template <typename T>
@@ -361,14 +364,82 @@ static bool RunHiddenCmd(const std::wstring& cmd, const std::wstring& workDir = 
     return false;
 }
 
-static void ExtractZip_(const std::wstring& zipPath, const std::wstring& destDir)
+static bool ExtractZip_(const std::wstring& zipPath, const std::wstring& destDir)
 {
-    std::wstring tarCmd = L"tar.exe -xf \"" + zipPath + L"\" -C \"" + destDir + L"\"";
-    if (!RunHiddenCmd(tarCmd, destDir)) {
-        std::wstring psCmd = L"powershell.exe -NoProfile -NonInteractive -Command \"Expand-Archive -Force -LiteralPath '"
-                           + zipPath + L"' -DestinationPath '" + destDir + L"'\"";
-        RunHiddenCmd(psCmd, destDir);
+    // Native in-process ZIP extraction using miniz.
+    // Avoids invoking external processes (powershell.exe / tar.exe), which triggers
+    // antivirus heuristics (e.g. Trojan:Win32/Sabsik or Wacatac).
+    HANDLE hFile = CreateFileW(zipPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER fileSize{};
+    if (!GetFileSizeEx(hFile, &fileSize) || fileSize.QuadPart <= 0 || fileSize.QuadPart > (500LL * 1024 * 1024)) {
+        CloseHandle(hFile);
+        return false;
     }
+
+    std::vector<uint8_t> buffer(static_cast<size_t>(fileSize.QuadPart));
+    DWORD bytesRead = 0;
+    if (!ReadFile(hFile, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, nullptr) ||
+        bytesRead != buffer.size()) {
+        CloseHandle(hFile);
+        return false;
+    }
+    CloseHandle(hFile);
+
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_mem(&zip, buffer.data(), buffer.size(), 0)) {
+        return false;
+    }
+
+    mz_uint numFiles = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < numFiles; ++i) {
+        mz_zip_archive_file_stat fileStat{};
+        if (!mz_zip_reader_file_stat(&zip, i, &fileStat)) continue;
+
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, fileStat.m_filename, -1, nullptr, 0);
+        if (wlen <= 0) continue;
+        std::wstring relPath(wlen - 1, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, fileStat.m_filename, -1, &relPath[0], wlen);
+
+        std::replace(relPath.begin(), relPath.end(), L'/', L'\\');
+
+        // Security check: Prevent Directory Traversal ("Zip Slip")
+        if (relPath.find(L"..\\") != std::wstring::npos ||
+            relPath.find(L"\\..") != std::wstring::npos ||
+            (!relPath.empty() && relPath.front() == L'\\')) {
+            continue;
+        }
+
+        std::wstring outPath = destDir + L"\\" + relPath;
+
+        if (mz_zip_reader_is_file_a_directory(&zip, i)) {
+            SHCreateDirectoryExW(nullptr, outPath.c_str(), nullptr);
+        } else {
+            size_t slash = outPath.find_last_of(L'\\');
+            if (slash != std::wstring::npos) {
+                std::wstring parent = outPath.substr(0, slash);
+                SHCreateDirectoryExW(nullptr, parent.c_str(), nullptr);
+            }
+
+            size_t uncompSize = 0;
+            void* pData = mz_zip_reader_extract_to_heap(&zip, i, &uncompSize, 0);
+            if (!pData) continue;
+
+            HANDLE hOut = CreateFileW(outPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hOut != INVALID_HANDLE_VALUE) {
+                DWORD written = 0;
+                WriteFile(hOut, pData, static_cast<DWORD>(uncompSize), &written, nullptr);
+                CloseHandle(hOut);
+            }
+            mz_free(pData);
+        }
+    }
+
+    mz_zip_reader_end(&zip);
+    return true;
 }
 
 // ── Application State ─────────────────────────────────────────────────────────
@@ -749,17 +820,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
 
     // 5. Execute additional_cmd if specified
     if (!additCmd.empty()) {
-        STARTUPINFOW si{};
-        si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_HIDE;
-        PROCESS_INFORMATION pi{};
         std::wstring cmd = L"cmd.exe /c " + additCmd;
-        if (CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE,
-                           CREATE_NO_WINDOW, nullptr, G.webfilesPath.c_str(), &si, &pi)) {
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-        }
+        RunHiddenCmd(cmd, G.webfilesPath);
     }
 
     // 6. Initialize WebView2
