@@ -43,6 +43,7 @@ CXXFLAGS = \
   -D_UNICODE \
   -DWINVER=0x0601 \
   -D_WIN32_WINNT=0x0601 \
+  -fstack-protector-strong \
   -I. \
   -I$(WV2_INC)
 
@@ -51,11 +52,17 @@ LDFLAGS = \
   -municode \
   -static-libgcc \
   -static-libstdc++ \
+  -Wl,--nxcompat \
+  -Wl,--dynamicbase \
+  -Wl,--high-entropy-va \
+  -Wl,--subsystem,windows:6.0 \
+  -Wl,--checksum \
   -lole32 \
   -loleaut32 \
   -lshell32 \
   -luuid \
-  -lshlwapi
+  -lshlwapi \
+  -lversion
 
 .PHONY: all clean
 

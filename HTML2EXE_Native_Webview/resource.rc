@@ -5,3 +5,33 @@
 
 // Embed the manifest
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
+
+// Embed application version info (reduces Defender / SmartScreen false positives)
+1 VERSIONINFO
+FILEVERSION 2,0,0,0
+PRODUCTVERSION 2,0,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "HTML2EXE"
+            VALUE "FileDescription", "HTML to Desktop Native Executable"
+            VALUE "FileVersion", "2.0.0.0"
+            VALUE "InternalName", "HTML2EXE"
+            VALUE "LegalCopyright", "Copyright (C) HTML2EXE"
+            VALUE "OriginalFilename", "Webview.exe"
+            VALUE "ProductName", "HTML2EXE"
+            VALUE "ProductVersion", "2.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
