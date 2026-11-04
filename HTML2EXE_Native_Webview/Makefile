@@ -37,6 +37,7 @@ CXXFLAGS = \
   -O2 \
   -Wall \
   -Wno-unknown-pragmas \
+  -Wno-unused-function \
   -mwindows \
   -municode \
   -DUNICODE \
@@ -56,7 +57,6 @@ LDFLAGS = \
   -Wl,--dynamicbase \
   -Wl,--high-entropy-va \
   -Wl,--subsystem,windows:6.0 \
-  -Wl,--checksum \
   -lole32 \
   -loleaut32 \
   -lshell32 \
