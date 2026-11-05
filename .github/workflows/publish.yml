@@ -46,6 +46,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
 
@@ -60,7 +61,12 @@ jobs:
         dotnet-version: ${{ env.DOTNET_VERSION }}
 
     - name: Install MinGW-w64 cross-compiler
-      run: sudo apt-get install -y mingw-w64
+      run: |
+        sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
+        sudo apt-get install -y --no-install-recommends \
+          -o Acquire::Retries=3 \
+          -o Acquire::http::Timeout=20 \
+          g++-mingw-w64-x86-64
 
     - name: Download rcedit (Windows PE icon editor)
       run: |
