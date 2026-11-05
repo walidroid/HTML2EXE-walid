@@ -215,6 +215,39 @@ auto MakeAccelHandler(F&& fn) {
     return new AccelKeyPressedHandler<typename std::decay<F>::type>(std::forward<F>(fn));
 }
 
+template <typename F>
+class NewWindowRequestedHandler : public ICoreWebView2NewWindowRequestedEventHandler {
+    F m_fn;
+    ULONG m_ref = 1;
+public:
+    NewWindowRequestedHandler(F&& fn) : m_fn(std::forward<F>(fn)) {}
+    virtual ~NewWindowRequestedHandler() = default;
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = static_cast<ICoreWebView2NewWindowRequestedEventHandler*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++m_ref; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG r = --m_ref;
+        if (r == 0) delete this;
+        return r;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* wv, ICoreWebView2NewWindowRequestedEventArgs* args) override {
+        return m_fn(wv, args);
+    }
+};
+template <typename F>
+auto MakeNewWindowHandler(F&& fn) {
+    return new NewWindowRequestedHandler<typename std::decay<F>::type>(std::forward<F>(fn));
+}
+
+#ifndef IID_ICoreWebView2_3
+static const IID IID_ICoreWebView2_3 = {0xA0D6DF20, 0x3B92, 0x416D, {0xAA, 0x0C, 0x43, 0x7A, 0x9C, 0x72, 0x78, 0x57}};
+#endif
+
 // ── Tiny JSON parser ──────────────────────────────────────────────────────────
 
 static std::wstring JsonGetString(const std::string& json, const std::string& key)
@@ -593,7 +626,22 @@ static void InitWebView()
         }
 
         if (!url.empty() && url.substr(0, 8) != L"https://" && url.substr(0, 7) != L"http://") {
-            url = L"file:///" + url;
+            // Map local files inside webfilesPath to virtual HTTPS host (https://app.assets/...)
+            // This provides a secure origin, preventing "Non sécurisé" and blob:null issues
+            std::wstring normUrl = url;
+            std::replace(normUrl.begin(), normUrl.end(), L'/', L'\\');
+            std::wstring normPrefix = G.webfilesPath;
+            std::replace(normPrefix.begin(), normPrefix.end(), L'/', L'\\');
+            if (!normPrefix.empty() && normPrefix.back() != L'\\') normPrefix += L'\\';
+
+            if (normUrl.size() >= normPrefix.size() &&
+                _wcsnicmp(normUrl.c_str(), normPrefix.c_str(), normPrefix.size()) == 0) {
+                std::wstring rel = normUrl.substr(normPrefix.size());
+                std::replace(rel.begin(), rel.end(), L'\\', L'/');
+                url = L"https://app.assets/" + rel;
+            } else {
+                url = L"file:///" + url;
+            }
         }
     }
 
@@ -647,6 +695,31 @@ static void InitWebView()
 
                     G.ctrl = ctrl;
                     ctrl->get_CoreWebView2(G.wv.GetAddressOf());
+
+                    // Configure virtual host name mapping for secure HTTPS context
+                    ComPtr<ICoreWebView2_3> wv3;
+                    if (SUCCEEDED(G.wv->QueryInterface(IID_ICoreWebView2_3, (void**)wv3.GetAddressOf())) && wv3) {
+                        wv3->SetVirtualHostNameToFolderMapping(
+                            L"app.assets",
+                            G.webfilesPath.c_str(),
+                            (COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND)1 /* ALLOW */
+                        );
+                    }
+
+                    // Handle window.open() / target="_blank" to navigate in same window
+                    // and suppress Chromium's external popup window with address bar
+                    auto newWindowHandler = MakeNewWindowHandler(
+                        [](ICoreWebView2* wv, ICoreWebView2NewWindowRequestedEventArgs* args) -> HRESULT {
+                            LPWSTR uri = nullptr;
+                            args->get_Uri(&uri);
+                            if (uri) {
+                                wv->Navigate(uri);
+                                CoTaskMemFree(uri);
+                            }
+                            args->put_Handled(TRUE);
+                            return S_OK;
+                        });
+                    G.wv->add_NewWindowRequested(newWindowHandler, nullptr);
 
                     // Configure browser settings
                     ComPtr<ICoreWebView2Settings> settings;
