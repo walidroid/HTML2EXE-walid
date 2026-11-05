@@ -44,7 +44,6 @@ CXXFLAGS = \
   -D_UNICODE \
   -DWINVER=0x0601 \
   -D_WIN32_WINNT=0x0601 \
-  -fstack-protector-strong \
   -I. \
   -I$(WV2_INC)
 
